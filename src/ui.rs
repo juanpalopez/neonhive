@@ -412,6 +412,23 @@ fn draw_graph(buf: &mut Buffer, area: Rect, app: &mut App) {
     }
 }
 
+/// The flag part of a node's bottom row, at most `budget` cells: "loop x12"
+/// when it fits, else the word alone ("loop"), else only the glyph. Never a
+/// cut-off word or count.
+fn flag_status(short: &str, budget: usize) -> String {
+    let word = short.split(' ').next().unwrap_or("");
+    [
+        format!(" {HEALTH_GLYPH} {short} "),
+        format!(" {HEALTH_GLYPH} {word} "),
+        format!(" {HEALTH_GLYPH} {word}"),
+        format!(" {HEALTH_GLYPH} "),
+        format!(" {HEALTH_GLYPH}"),
+    ]
+    .into_iter()
+    .find(|s| s.chars().count() <= budget)
+    .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_node(
     buf: &mut Buffer,
@@ -518,16 +535,7 @@ fn draw_node(
         Status::Failed => (" ✖ fail".to_string(), fx::RED),
     };
     let (status, sc) = if health.is_flagged() {
-        // "loop x12" when it fits, else just "loop": never a cut-off count.
-        let short = a.health.short(health);
-        let full = format!(" {HEALTH_GLYPH} {short} ");
-        let word = short.split(' ').next().unwrap_or("");
-        let text = if full.chars().count() <= budget {
-            full
-        } else {
-            format!(" {HEALTH_GLYPH} {word} ")
-        };
-        (text, fx::ORANGE)
+        (flag_status(&a.health.short(health), budget), fx::ORANGE)
     } else {
         (status, sc)
     };
@@ -922,6 +930,27 @@ mod tests {
         app.selected = 0;
         let text = frame(&mut app, 140, 40);
         assert!(text.contains("% of session"), "subagent share missing");
+    }
+
+    #[test]
+    fn flag_status_never_cuts_a_word() {
+        assert_eq!(flag_status("loop x12", 20), " ▲ loop x12 ");
+        assert_eq!(flag_status("loop x12", 9), " ▲ loop ");
+        assert_eq!(flag_status("stalled", 10), " ▲ stalled");
+        // A 16-cell box with a token count leaves about 7 cells.
+        assert_eq!(flag_status("stalled", 7), " ▲ ");
+        assert_eq!(flag_status("loop x5", 7), " ▲ loop");
+        assert_eq!(flag_status("err x3", 6), " ▲ err");
+        assert_eq!(flag_status("err x3", 1), "");
+        for budget in 0..20 {
+            for short in ["loop x12", "err x3", "stalled"] {
+                let s = flag_status(short, budget);
+                assert!(s.chars().count() <= budget);
+                let word = s.trim().trim_start_matches(HEALTH_GLYPH).trim();
+                assert!(word.is_empty() || short.starts_with(word), "{s:?}");
+                assert!(word.is_empty() || short.split(' ').any(|w| word.ends_with(w)));
+            }
+        }
     }
 
     #[test]
