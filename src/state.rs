@@ -96,6 +96,8 @@ pub struct World {
     pub now_ts: i64,
     pub total_tools: u64,
     pub total_msgs: u64,
+    /// Tool calls by tool name, over all agents.
+    pub tool_counts: HashMap<String, u64>,
     pub fx: Vec<Fx>,
 }
 
@@ -108,6 +110,7 @@ impl World {
             now_ts: 0,
             total_tools: 0,
             total_msgs: 0,
+            tool_counts: HashMap::new(),
             fx: Vec::new(),
         };
         w.ensure(ROOT, 0);
@@ -305,6 +308,7 @@ impl World {
                 }
                 a.recent_tools.push_back(line.clone());
                 self.total_tools += 1;
+                *self.tool_counts.entry(tool.clone()).or_insert(0) += 1;
                 self.say(ts, agent, LogKind::Tool, line);
                 if animate {
                     self.fx.push(Fx::Flash(agent.clone()));

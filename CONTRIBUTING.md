@@ -132,6 +132,7 @@ and after your change. For visual changes, please include a before and after.
 | `src/ui.rs` | Rendering |
 | `src/picker.rs` | Session list screen |
 | `src/svg.rs` | SVG export |
+| `src/report.rs` | `neonhive report`: Markdown and JSON summary of a `World` |
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains how they fit together and how to add an adapter for another agent tool.
 
