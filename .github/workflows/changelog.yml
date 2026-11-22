@@ -1,0 +1,32 @@
+name: Changelog
+
+# User-facing pull requests (feat, fix, perf, or any breaking "!") must change
+# CHANGELOG.md. This is about content, so fork pull requests are enforced too.
+# Plain pull_request trigger with a read-only token: it reads PR code and the
+# title, so it must not use pull_request_target.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+jobs:
+  changelog:
+    name: changelog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      # Title and labels are PR-controlled: they go through env and are quoted,
+      # never interpolated into the script text.
+      - name: Check changelog entry
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          SKIP_CHANGELOG: ${{ contains(github.event.pull_request.labels.*.name, 'skip-changelog') && '1' || '0' }}
+        run: scripts/check-changelog.sh "$PR_TITLE" "$BASE_SHA" "$HEAD_SHA"
