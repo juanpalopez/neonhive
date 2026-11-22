@@ -6,6 +6,14 @@ All notable changes to this project are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `neonhive report [SESSION] [--json]`: prints a Markdown or JSON summary of a session (header, token split, agent table, most used tools, failures) without opening the UI. Defaults to the most recent session. Reports contain labels and tool names, never prompts.
+
+### Changed
+
+- Token counts now include prompt-cache writes and are tracked per kind (input, output, cache read, cache write) and per model. The inspector shows the split. Earlier counts ignored cache tokens and were far too low on long sessions.
+
 ## [0.1.0] - 2026-11-22
 
 ### Added

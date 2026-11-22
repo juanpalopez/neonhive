@@ -57,8 +57,6 @@ Tests do not show what the screen looks like. For any change to `ui`, `app` layo
 
 ## File map
 
-On `main` after the cost, health and report branches merge:
-
 | Path | Role |
 | --- | --- |
 | `src/main.rs` | CLI flags, `report` subcommand, wiring |
@@ -77,4 +75,4 @@ On `main` after the cost, health and report branches merge:
 | `scripts/` | CI checks, runnable locally (see Commands) |
 | `docs/` | `ARCHITECTURE.md`, `RELEASING.md`, `demo.svg` |
 
-Until those branches merge, `health.rs`, `pricing.rs` and `report.rs` exist only on `feat/stuck-detection`.
+`src/health.rs` arrives with pull request #23; until that merges it exists only on `feat/stuck-detection`.

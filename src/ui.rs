@@ -479,7 +479,7 @@ fn draw_node(
 
     let mut bot: Row = vec![(bl, border, false), (h, border, false)];
     // Whole thousands here: the box is narrow.
-    let tokens = match a.tokens {
+    let tokens = match a.shown_tokens() {
         n if n >= 1_000_000 => format!(" {:.1}M ", n as f64 / 1e6),
         n if n >= 1_000 => format!(" {}k ", n / 1_000),
         n => format!(" {n} "),
@@ -580,9 +580,25 @@ fn draw_inspector(buf: &mut Buffer, area: Rect, app: &App) {
             "TOKENS",
             format!(
                 "{}   tools {}   err {}",
-                fmt_tokens(a.tokens),
+                fmt_tokens(a.shown_tokens()),
                 a.tools,
                 a.errors
+            ),
+        ),
+        kv(
+            "IN/OUT",
+            format!(
+                "{} / {}",
+                fmt_tokens(a.tokens.input),
+                fmt_tokens(a.tokens.output)
+            ),
+        ),
+        kv(
+            "CACHE",
+            format!(
+                "write {}   read {}",
+                fmt_tokens(a.tokens.cache_write),
+                fmt_tokens(a.tokens.cache_read)
             ),
         ),
         rule("PROMPT"),

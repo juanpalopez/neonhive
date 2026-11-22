@@ -19,7 +19,7 @@ Everything the UI can show is one of eight events:
 | `Message { from, to, summary }` | One agent sent a message to another |
 | `Tool { agent, tool, detail }` | An agent called a tool |
 | `ToolError { agent }` | A tool call failed |
-| `Usage { agent, tokens, model }` | Tokens used by one model response |
+| `Usage { agent, tokens, model }` | Tokens used by one model response, split into input, output, cache read and cache write |
 | `Text { agent, text }` | An agent wrote text |
 | `Prompt { agent, text }` | An agent received its prompt |
 
@@ -58,6 +58,7 @@ How lines become events:
 - A new `agent-<id>.jsonl` file becomes a `Spawn`. The parent is whoever made the tool call named in the `.meta.json` file. This is how nested subagents get the right parent.
 - A background subagent finishes with a task notification attached to its parent's transcript; a foreground subagent finishes with a tool result. Both become `Finish`.
 - Token usage is repeated on every line of a multi-line model response, so it is counted once per response id.
+- The token count shown for an agent is input + output + cache writes. Cache reads are tracked but left out of that number: a session re-reads the same cached context on every turn, so adding reads would count it once per turn. The inspector shows all four.
 
 This format is not a published contract. The adapter treats every field as
 optional and skips lines it cannot parse.

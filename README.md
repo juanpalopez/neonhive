@@ -35,6 +35,7 @@ neonhive --demo
 - **Inspector.** Select an agent to see its prompt, model, token count, tool calls, errors and last output.
 - **Event stream.** A running log of spawns, tool calls, messages and results, coloured by agent.
 - **Scales to big sessions.** Hundreds of subagents stay readable: active agents hold the screen, finished ones dissolve into an archive counter.
+- **Session reports.** `neonhive report` prints a Markdown or JSON summary of a session: tokens by kind, an agent table, most used tools and failures. Paste it into a pull request or feed it to a script.
 - **Read-only and local.** neonhive only reads transcript files that Claude Code already writes to your disk. It sends nothing over the network and changes no files.
 - **Works anywhere.** 24-bit colour where the terminal supports it, a 256-colour palette where it does not.
 
@@ -70,6 +71,68 @@ new activity. An older session opens as a **replay** from its start. Force eithe
 
 Start Claude Code in one terminal, run `neonhive --latest` in another, and ask Claude
 to do something that uses subagents.
+
+### Session reports
+
+`neonhive report` summarizes a session on stdout and does not open the UI. Without
+an argument it reports the most recent session.
+
+```sh
+neonhive report                          # Markdown, most recent session
+neonhive report path/to/session.jsonl    # a specific session
+neonhive report --json > report.json     # JSON for scripts
+neonhive report >> "$GITHUB_STEP_SUMMARY"
+```
+
+The Markdown has a header (start, duration, agents, tool calls, errors), a token
+table split into input, output, cache write and cache read, an agent table in spawn
+order with nesting (`↳`), the ten most used tools, and a list of failed agents and
+agents with tool errors. It renders on GitHub.
+
+A report holds agent labels, tool names and counts. It never includes prompts,
+messages or tool arguments. Labels are the task descriptions the agent was given,
+so they can still mention file names or internal projects: **review a report before
+you share it.**
+
+The JSON layout is stable within a `schema` version. Keys are sorted, durations and
+times are milliseconds, and `start_ms` is Unix time. An abridged example:
+
+```json
+{
+  "agent_count": 2,
+  "agents": [
+    {
+      "depth": 0, "duration_ms": 60000, "errors": 0, "id": "main",
+      "label": "myproject", "models": ["model-a"], "parent": null,
+      "start_ms": 1700000000000, "status": "running", "tool_calls": 3,
+      "tokens": { "cache_read": 1000, "cache_write": 20, "input": 100, "output": 50, "total": 170 },
+      "type": "main"
+    },
+    {
+      "depth": 1, "duration_ms": 4000, "errors": 1, "id": "a1",
+      "label": "Map the code", "models": [], "parent": "main",
+      "start_ms": 1700000001000, "status": "failed", "tool_calls": 2,
+      "tokens": { "cache_read": 0, "cache_write": 0, "input": 0, "output": 0, "total": 0 },
+      "type": "explorer"
+    }
+  ],
+  "duration_ms": 60000,
+  "errors": 1,
+  "failures": [
+    { "errors": 1, "failed": true, "id": "a1", "label": "Map the code", "type": "explorer" }
+  ],
+  "schema": 1,
+  "start_ms": 1700000000000,
+  "title": "myproject",
+  "tokens": { "cache_read": 1000, "cache_write": 20, "input": 100, "output": 50, "total": 170 },
+  "tool_calls": 5,
+  "tools": [ { "calls": 3, "tool": "Read" }, { "calls": 2, "tool": "Bash" } ]
+}
+```
+
+`tokens.total` is the headline number shown in the UI: input, output and cache
+writes, without cache reads. An agent's `status` is `running` if its session never
+recorded a result for it.
 
 ### Keys
 
