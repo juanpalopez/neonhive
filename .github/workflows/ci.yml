@@ -10,6 +10,16 @@ on:
 permissions:
   contents: read
 
+# One run per ref. A new push to a pull request cancels the older run; pushes
+# to main and calls from release.yml never cancel anything. When called from
+# release.yml, github.workflow is the caller's name ("Release") and
+# github.event_name is the caller's event (push), so the group differs from the
+# standalone CI group and cancel-in-progress is false: a release is never
+# cancelled and nothing waits on its own group.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -17,8 +27,11 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -26,16 +39,46 @@ jobs:
       - run: cargo fmt --check
       # Lint levels live in the [lints] table of Cargo.toml.
       - run: cargo clippy --all-targets -- -D warnings
+      # actionlint (pinned, checksum-verified) on the workflows, shellcheck on scripts/*.sh.
+      - name: Lint workflows and scripts
+        run: scripts/lint-workflows.sh
 
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test
+
+  # Builds with the oldest Rust the crate promises to support. The version is
+  # read from rust-version in Cargo.toml so the two cannot drift.
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install the toolchain named by rust-version
+        run: |
+          msrv="$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)"
+          if [[ -z "$msrv" ]]; then
+            echo "::error title=msrv::rust-version not found in Cargo.toml"
+            exit 1
+          fi
+          echo "MSRV is $msrv"
+          rustup toolchain install "$msrv" --profile minimal
+          rustup default "$msrv"
+          rustc --version
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-targets

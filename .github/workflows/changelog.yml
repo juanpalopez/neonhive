@@ -16,6 +16,7 @@ jobs:
   changelog:
     name: changelog
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
         with:

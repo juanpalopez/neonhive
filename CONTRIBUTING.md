@@ -27,6 +27,10 @@ cargo test
 Lint levels are set in the `[lints]` table of `Cargo.toml`, so `cargo clippy` on
 your machine reports the same things as CI.
 
+If you change a workflow or a script, also run `scripts/lint-workflows.sh`. It runs
+`actionlint` and `shellcheck`, which you install first (`brew install actionlint shellcheck`).
+CI also checks that the crate still builds on the Rust version in `rust-version` (the `msrv` job).
+
 ## Pull request titles
 
 Pull requests are squash-merged, and the title becomes the commit message on
