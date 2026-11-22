@@ -75,6 +75,7 @@ Tests do not show what the screen looks like. For any change to `ui`, `app` layo
 | `src/ui.rs` | Rendering into the ratatui buffer |
 | `src/picker.rs` | Session list screen |
 | `src/report.rs` | `neonhive report`: Markdown or JSON summary, never prompts |
+| `src/watch.rs` | `neonhive watch`: alert logic (`Watcher`, `Idle`), pure and clock-free |
 | `src/svg.rs` | SVG export |
 | `src/fx.rs`, `src/util.rs` | Palette and color math; text and time helpers |
 | `scripts/` | CI checks, runnable locally (see Commands) |

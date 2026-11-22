@@ -11,6 +11,7 @@ mod state;
 mod svg;
 mod ui;
 mod util;
+mod watch;
 
 use app::{App, Mode, SPEEDS};
 use clap::{Parser, Subcommand};
@@ -76,12 +77,29 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Follow a session without a UI and print one line per alert: a failed
+    /// agent, a looping, erroring or stalled one, a passed budget.
+    Watch {
+        /// Session transcript (.jsonl). Defaults to the most recent session.
+        session: Option<PathBuf>,
+        #[command(flatten)]
+        opts: watch::Opts,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if let Some(file) = &args.prices {
-        pricing::load(file)?;
+        if let Err(e) = pricing::load(file) {
+            if matches!(args.command, Some(Command::Watch { .. })) {
+                eprintln!("error: {e:#}");
+                std::process::exit(watch::EXIT_ERROR);
+            }
+            return Err(e);
+        }
+    }
+    if let Some(Command::Watch { session, opts }) = &args.command {
+        std::process::exit(watch_session(session.as_deref(), opts));
     }
     if let Some(Command::Report { session, json }) = &args.command {
         return report(session.as_deref(), *json);
@@ -171,6 +189,78 @@ fn report(session: Option<&Path>, json: bool) -> anyhow::Result<()> {
         Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
         _ => Ok(()),
     }
+}
+
+/// Runs `neonhive watch` and returns the process exit code.
+fn watch_session(session: Option<&Path>, opts: &watch::Opts) -> i32 {
+    match watch_loop(session, opts) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            watch::EXIT_ERROR
+        }
+    }
+}
+
+fn watch_loop(session: Option<&Path>, opts: &watch::Opts) -> anyhow::Result<i32> {
+    use std::io::Write;
+    let sessions = claude::sessions();
+    let (path, info) = match session {
+        Some(p) => {
+            anyhow::ensure!(p.is_file(), "no such session file: {}", p.display());
+            let p = p.canonicalize()?;
+            let info = sessions.iter().find(|s| s.path == p);
+            (p, info)
+        }
+        None => {
+            let first = sessions
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("no Claude Code sessions found"))?;
+            (first.path.clone(), Some(first))
+        }
+    };
+    let title = match info {
+        Some(s) => s.project.clone(),
+        None => path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    let mut world = state::World::new(&title);
+    let mut watcher = watch::Watcher::new(opts.max_tokens, opts.max_cost);
+    let mut source = ClaudeSource::open(&path);
+    let mut idle = watch::Idle::new(opts.idle_exit, util::now_ms());
+    let mut fired = false;
+    let mut out = std::io::stdout().lock();
+    loop {
+        let events = source.poll();
+        let clock = (!opts.once).then(util::now_ms);
+        let mut closed = false;
+        for alert in watcher.poll(&mut world, &events, clock) {
+            fired |= alert.kind.is_problem();
+            // A reader that closes the pipe early (`| head`) ends the watch.
+            let wrote = writeln!(out, "{}", alert.render(opts.json)).and_then(|()| out.flush());
+            match wrote {
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => closed = true,
+                Err(e) => return Err(e.into()),
+                Ok(()) => {}
+            }
+        }
+        if opts.once || closed {
+            break;
+        }
+        // The first poll returns the history, which counts as activity.
+        idle.note(events.len(), util::now_ms());
+        if idle.expired(util::now_ms()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(opts.interval));
+    }
+    Ok(if fired {
+        watch::EXIT_ALERTS
+    } else {
+        watch::EXIT_OK
+    })
 }
 
 fn demo() -> App {

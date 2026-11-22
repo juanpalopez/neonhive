@@ -47,6 +47,7 @@ neonhive --demo
 - **Cost estimates.** Estimated cost per agent, per agent type and for the whole session, and how much of it the subagents spent. See [Cost estimates](#cost-estimates).
 - **Stuck and loop detection.** Agents that repeat the exact same tool call in quick succession (polling with pauses between calls does not count), fail several calls in a row or go silent mid-task are flagged in orange on the graph, in the roster and in the inspector, which says why. Works in replay too.
 - **Session reports.** `neonhive report` prints a Markdown or JSON summary of a session: tokens by kind, an agent table, most used tools and failures. Paste it into a pull request or feed it to a script.
+- **Watchdog.** `neonhive watch` follows a session with no UI and prints one line per alert: an agent failed, an agent is looping, erroring or stalled, or the session passed a token or cost budget. Exit codes make it usable in scripts and CI. See [Watching a session](#watching-a-session).
 
 ### Safe to run
 
@@ -85,6 +86,46 @@ new activity. An older session opens as a **replay** from its start. Force eithe
 
 Start Claude Code in one terminal, run `neonhive --latest` in another, and ask Claude
 to do something that uses subagents.
+
+### Watching a session
+
+`neonhive watch [SESSION]` follows a session without opening the UI and prints one
+line per alert to stdout. Without an argument it watches the most recent session.
+
+```sh
+neonhive watch                                  # follow the latest session
+neonhive watch --max-tokens 2000000 --max-cost 5
+neonhive watch --json | jq -r .message          # one JSON object per line
+neonhive watch --once path/to/session.jsonl     # print current alerts and exit
+neonhive watch --idle-exit 300                  # stop after 5 quiet minutes
+```
+
+Alerts: an agent failed; an agent was flagged looping, erroring or stalled (same
+rules as the UI; one alert when the flag appears, and a `recovered` line when it
+goes away); the session passed `--max-tokens N` (input + output + cache writes) or
+`--max-cost USD` (the estimate from [Cost estimates](#cost-estimates); if some
+agents could not be priced the alert says so, since the real cost is then higher).
+Each budget alert fires once. `--prices FILE` works as everywhere else.
+`--interval MS` sets the poll interval (default 1000, lowest 100).
+
+With `--json` every line has the same keys, `null` where they do not apply:
+
+```json
+{"ts":1700000000000,"kind":"looping","agent":"a1","label":"Fix it","message":"agent loop: Bash x4","value":null,"limit":null,"unpriced":null}
+{"ts":1700000060000,"kind":"max_cost","agent":null,"label":"","message":"estimated cost ~$5.20 passed the limit of $5.00","value":5.2,"limit":5.0,"unpriced":0}
+```
+
+`kind` is `failed`, `looping`, `erroring`, `stalled`, `recovered`, `max_tokens` or
+`max_cost`. `ts` is Unix milliseconds.
+
+Exit codes: `0` when the session ended cleanly or `--once` found nothing, `1` when
+at least one alert fired (`recovered` lines do not count), `2` for a usage error or
+an unreadable session. Transcripts have no end marker, so a live session counts as
+ended when no new events arrive for `--idle-exit SECONDS`. That is off by default:
+without it, watch runs until you stop it. Press Ctrl-C to stop; neonhive installs no
+signal handler, so the shell reports the usual interrupted status. `--once` uses the
+session's own clock (its last event), so it cannot report stalls that only show as
+real time passes. Alerts name agents by id and label, never prompts or tool input.
 
 ### Session reports
 
