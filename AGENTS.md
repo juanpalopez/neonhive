@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Rules for AI coding agents working in neonhive: a Rust terminal UI that animates AI agents and subagents (Claude Code is the only real source today). Human contributors: see [CONTRIBUTING.md](CONTRIBUTING.md). Where this file and the repo disagree, the repo wins; fix this file.
+Rules for AI coding agents working in neonhive: a Rust terminal UI that animates AI agents and subagents (Claude Code and Codex CLI are the real sources today). Human contributors: see [CONTRIBUTING.md](CONTRIBUTING.md). Where this file and the repo disagree, the repo wins; fix this file.
 
 ## Commands
 
@@ -42,7 +42,7 @@ Do not weaken a check to get green: no lowered limit, dropped step, or edit to `
 
 Pipeline: transcript files -> source adapter (`Source`) -> `Event` -> `World` -> `App` -> `ui`. Each stage knows only the stage before it. Details and how to add an adapter: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-- Nothing outside a source adapter knows about a specific agent tool. Claude-specific names, paths and formats stay in `src/claude.rs`. Exceptions: the model-price table in `src/pricing.rs` is data, and `src/main.rs` and `src/picker.rs` wire the adapter in. Reason: a second adapter must need no change to `state.rs`, `app.rs` or `ui.rs`.
+- Nothing outside a source adapter knows about a specific agent tool. Claude-specific names, paths and formats stay in `src/claude.rs`, and Codex-specific ones in `src/codex.rs`. Exceptions: the model-price table in `src/pricing.rs` is data, and `src/main.rs` and `src/picker.rs` wire the adapter in. Reason: a second adapter must need no change to `state.rs`, `app.rs` or `ui.rs`.
 - Parse defensively. Transcript formats are not a contract: treat every field as optional, skip what you do not recognise, never panic on input.
 - Never panic at any terminal size. `ui::tests::never_panics_at_any_terminal_size` sweeps sizes; keep it passing and keep new drawing code inside it.
 - No network code and no writes to session files (see [SECURITY.md](SECURITY.md)). Reason: transcripts hold private prompts and code, and users trust the tool because it only reads.
@@ -67,6 +67,7 @@ Tests do not show what the screen looks like. For any change to `ui`, `app` layo
 | `src/main.rs` | CLI flags, `report` subcommand, wiring |
 | `src/event.rs` | `Event` enum and the `Source` trait |
 | `src/claude.rs` | Claude Code adapter: parsing, tailing, session discovery |
+| `src/codex.rs` | Codex CLI adapter: rollout parsing (plain and `.zst`), tailing, subagent threads, session discovery |
 | `src/demo.rs` | Synthetic scripted adapter |
 | `src/state.rs` | `World`: events folded into agents, log, totals, cost, health |
 | `src/health.rs` | Stuck and loop detection (`Tracker`, flags) |
