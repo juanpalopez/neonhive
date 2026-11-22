@@ -1,0 +1,27 @@
+# Weekly dependency updates. Dependabot branches are exempt from the branch
+# name check, and these prefixes satisfy the commit and title checks.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "build(deps)"
+    groups:
+      # Most dependencies are 0.x, where a minor bump can break. Only patches
+      # are grouped; minors and majors arrive as separate pull requests.
+      cargo-patch:
+        update-types: ["patch"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

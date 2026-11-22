@@ -20,6 +20,7 @@ All notable changes to this project are recorded here. The format follows
 
 ### Fixed
 
+- Cost estimates price 1-hour prompt-cache writes at their own rate (2x input) instead of the 5-minute rate (1.25x). The split comes from the transcript; the inspector and `neonhive report` show both kinds, and the report JSON gains `cache_write_5m` and `cache_write_1h` (`cache_write` is still the total). `--prices` files may add an optional `cache_write_1h`, which defaults to `cache_write`.
 - Background subagents whose completion is written only as a queued task notification or as a user turn that is the notification now finish. They used to stay running forever.
 
 ## [0.1.0] - 2026-11-22
