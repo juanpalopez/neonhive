@@ -60,7 +60,50 @@ fix(claude): count usage once per response
 feat!: rename --latest to --last
 ```
 
-Commits inside the pull request can be titled however you like.
+## Commit messages
+
+Every commit in your pull request uses the same format as the title, and CI checks
+the subject line of each one (the `commit messages` check):
+
+```
+feat(ui): add timeline bar to replay
+fix(claude): count usage once per response
+```
+
+Merge commits, `Revert "..."`, and `fixup!` / `squash!` / `amend!` commits are
+allowed. The body of a commit is free-form. To check before you push:
+
+```sh
+scripts/check-commit-messages.sh origin/main HEAD
+```
+
+To fix a subject, run `git rebase -i origin/main`, mark the commit as `reword`, then
+`git push --force-with-lease`. For the latest commit, `git commit --amend` is enough.
+
+## Branch names
+
+Name your branch `<type>/<short-kebab-description>`, with the same types as the
+titles above. The description uses lower-case letters, digits and single hyphens:
+
+```
+feat/cost-accounting
+fix/usage-double-count
+ci/branch-and-commit-checks
+```
+
+CI checks this (the `branch name` check). Bot branches (`dependabot/`, `renovate/`)
+and `release/` branches are exempt. Pull requests from a fork only get a warning,
+since a branch called `main` or `patch-1` is common there and does not reach history
+after a squash merge. To rename a branch:
+
+```sh
+git branch -m feat/new-name
+git push origin -u feat/new-name
+git push origin --delete old-name
+```
+
+Then open the pull request again from the renamed branch. To check a name locally:
+`scripts/check-branch-name.sh "$(git branch --show-current)"`.
 
 ## Looking at your change
 
