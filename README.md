@@ -99,7 +99,7 @@ neonhive report >> "$GITHUB_STEP_SUMMARY"
 ```
 
 The Markdown has a header (start, duration, agents, tool calls, errors), a token
-table split into input, output, cache write and cache read, an agent table in spawn
+table split into input, output, cache write (5-minute and 1-hour) and cache read, an agent table in spawn
 order with nesting (`↳`), the ten most used tools, and a list of failed agents and
 agents with tool errors. It renders on GitHub.
 
@@ -119,14 +119,14 @@ times are milliseconds, and `start_ms` is Unix time. An abridged example:
       "depth": 0, "duration_ms": 60000, "errors": 0, "id": "main",
       "label": "myproject", "models": ["model-a"], "parent": null,
       "start_ms": 1700000000000, "status": "running", "tool_calls": 3,
-      "tokens": { "cache_read": 1000, "cache_write": 20, "input": 100, "output": 50, "total": 170 },
+      "tokens": { "cache_read": 1000, "cache_write": 20, "cache_write_1h": 8, "cache_write_5m": 12, "input": 100, "output": 50, "total": 170 },
       "type": "main"
     },
     {
       "depth": 1, "duration_ms": 4000, "errors": 1, "id": "a1",
       "label": "Map the code", "models": [], "parent": "main",
       "start_ms": 1700000001000, "status": "failed", "tool_calls": 2,
-      "tokens": { "cache_read": 0, "cache_write": 0, "input": 0, "output": 0, "total": 0 },
+      "tokens": { "cache_read": 0, "cache_write": 0, "cache_write_1h": 0, "cache_write_5m": 0, "input": 0, "output": 0, "total": 0 },
       "type": "explorer"
     }
   ],
@@ -138,14 +138,15 @@ times are milliseconds, and `start_ms` is Unix time. An abridged example:
   "schema": 1,
   "start_ms": 1700000000000,
   "title": "myproject",
-  "tokens": { "cache_read": 1000, "cache_write": 20, "input": 100, "output": 50, "total": 170 },
+  "tokens": { "cache_read": 1000, "cache_write": 20, "cache_write_1h": 8, "cache_write_5m": 12, "input": 100, "output": 50, "total": 170 },
   "tool_calls": 5,
   "tools": [ { "calls": 3, "tool": "Read" }, { "calls": 2, "tool": "Bash" } ]
 }
 ```
 
 `tokens.total` is the headline number shown in the UI: input, output and cache
-writes, without cache reads. An agent's `status` is `running` if its session never
+writes, without cache reads. `cache_write` is the total of both write kinds, as it
+always was; `cache_write_5m` and `cache_write_1h` split it. An agent's `status` is `running` if its session never
 recorded a result for it.
 
 ### Keys
@@ -172,8 +173,9 @@ and their share of the session. Press `c` for cost by agent type.
 These are **estimates**, marked with `~`. They multiply the token counts in the
 transcript by list prices built into neonhive (taken 2026-11-22 from Anthropic's
 pricing page). They do not know about discounts, batch or fast mode, data residency
-or long-context tiers. The transcript does not say whether a cache write used the
-5-minute or 1-hour cache, so all writes are priced at the 5-minute rate. An agent
+or long-context tiers. Cache writes are priced by cache lifetime: the 5-minute
+rate (1.25x input) and the 1-hour rate (2x input), using the split Claude Code records
+in each usage entry. An entry with no split is priced as 5-minute. An agent
 whose model has no known price shows tokens only and a dash for cost; a trailing `+`
 on a total means some agents could not be priced.
 
@@ -188,10 +190,13 @@ neonhive --latest --prices prices.json
 
 ```json
 {
-  "claude-sonnet-4-5": { "input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 6.0 },
+  "claude-sonnet-4-5": { "input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75, "cache_write_1h": 6.0 },
   "my-local-model":    { "input": 0,   "output": 0,    "cache_read": 0,   "cache_write": 0 }
 }
 ```
+
+`cache_write_1h` is optional. When it is missing, 1-hour writes are priced at that
+entry's `cache_write` rate, so price files written before it existed keep working.
 
 neonhive never fetches prices from the network.
 

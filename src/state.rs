@@ -819,6 +819,25 @@ mod tests {
     }
 
     #[test]
+    fn one_hour_cache_writes_cost_more_than_five_minute_ones() {
+        let mut w = World::new("proj");
+        w.apply(&ev(10, spawn("a1", ROOT)), false);
+        let writes = |five, hour| Kind::Usage {
+            agent: "a1".into(),
+            model: "claude-opus-5-5".into(),
+            tokens: Tokens {
+                cache_write_5m: five,
+                cache_write_1h: hour,
+                ..Tokens::default()
+            },
+        };
+        w.apply(&ev(11, writes(1_000_000, 0)), false); // $5
+        w.apply(&ev(12, writes(0, 1_000_000)), false); // $8
+        let c = w.agents["a1"].cost().unwrap();
+        assert!((c - 13.0).abs() < 1e-9, "{c}");
+    }
+
+    #[test]
     fn agent_with_only_a_reported_total_has_no_cost() {
         let mut w = World::new("proj");
         w.apply(&ev(10, spawn("a1", ROOT)), false);

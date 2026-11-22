@@ -630,14 +630,16 @@ fn draw_inspector(buf: &mut Buffer, area: Rect, app: &App) {
                 fmt_tokens(a.tokens.output)
             ),
         ),
+        // Two short lines: the inspector is 38 cells wide, 28 for the value.
         kv(
             "CACHE",
             format!(
-                "write {}   read {}",
-                fmt_tokens(a.tokens.cache_write),
-                fmt_tokens(a.tokens.cache_read)
+                "write 5m {}  1h {}",
+                fmt_tokens(a.tokens.cache_write_5m),
+                fmt_tokens(a.tokens.cache_write_1h)
             ),
         ),
+        kv("", format!("read {}", fmt_tokens(a.tokens.cache_read))),
         kv("COST", a.cost().map_or_else(|| "—".to_string(), fmt_usd)),
     ];
     if a.id == ROOT {
