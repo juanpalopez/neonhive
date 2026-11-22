@@ -1,17 +1,23 @@
 //! Rendering. Everything draws straight into the ratatui buffer.
 
-use crate::app::{App, Mode, Space, BORN_SECS, DYING_SECS};
+use crate::app::{
+    log_who, side_width, stream_height, App, Mode, Panel, Space, BORN_SECS, DYING_SECS,
+    SIDE_MIN_TERM_W,
+};
 use crate::event::ROOT;
 use crate::fx::{self, Rgb};
 use crate::state::{Agent, LogKind, PacketKind, Status, World};
-use crate::util::{clean, fmt_clock, fmt_dur, fmt_tokens, fmt_usd, hash};
+use crate::util::{
+    clean, find_ci, fmt_clock, fmt_dur, fmt_tokens, fmt_usd, hash, needle, tail_fit,
+};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Widget, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Widget};
 use ratatui::Frame;
 use std::collections::HashMap;
+use unicode_width::UnicodeWidthChar;
 
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const GLITCH: [char; 12] = ['▓', '▒', '░', '#', '%', '/', '\\', '0', '1', '$', '≡', '¦'];
@@ -38,6 +44,59 @@ pub fn panel(title: &str) -> Block<'_> {
         .border_type(BorderType::Plain)
         .border_style(fg(fx::DIM))
         .title(Span::styled(title, bold(fx::CYAN)))
+}
+
+/// A panel frame that shows whether the panel has keyboard focus: a brighter
+/// border and a `▸` before the title.
+fn pane(title: &'static str, focused: bool) -> Block<'static> {
+    if focused {
+        Block::bordered()
+            .border_type(BorderType::Plain)
+            .border_style(fg(fx::CYAN.scale(0.75)))
+            .title(Span::styled(format!("▸{title}"), bold(fx::CYAN)))
+    } else {
+        panel(title)
+    }
+}
+
+/// `pane` for panel `p`, `area_w` cells wide, with status parts on the
+/// right of the top border. Each part has a priority; parts that do not fit
+/// beside the title are dropped, lowest priority first. A maximised panel
+/// adds a restore hint at the lowest priority.
+fn pane_for(
+    title: &'static str,
+    app: &App,
+    p: Panel,
+    area_w: u16,
+    mut right: Vec<(u8, Span<'static>)>,
+) -> Block<'static> {
+    let focused = app.panes.focus == p;
+    if focused && app.panes.maximised {
+        right.insert(0, (0, Span::styled(" z restore ", fg(fx::DIM))));
+    }
+    let left = title.chars().count() + usize::from(focused);
+    let mut room = (area_w as usize).saturating_sub(left + 4);
+    let mut by_rank: Vec<usize> = (0..right.len()).collect();
+    by_rank.sort_by_key(|&i| std::cmp::Reverse(right[i].0));
+    let mut keep = vec![false; right.len()];
+    for i in by_rank {
+        let w = right[i].1.width();
+        if w <= room {
+            room -= w;
+            keep[i] = true;
+        }
+    }
+    let spans: Vec<Span> = right
+        .into_iter()
+        .zip(keep)
+        .filter_map(|((_, s), k)| k.then_some(s))
+        .collect();
+    let block = pane(title, focused);
+    if spans.is_empty() {
+        block
+    } else {
+        block.title(Line::from(spans).right_aligned())
+    }
 }
 
 pub fn agent_color(a: &Agent) -> Rgb {
@@ -71,32 +130,81 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         );
         return;
     }
+    app.panes.term = (area.width, area.height);
+    app.panes.side_shown = area.width >= SIDE_MIN_TERM_W;
+    let log_h = stream_height(app.panes.stream_h, area.height);
     let [header, body, log, footer] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Min(8),
-        Constraint::Length(9),
+        Constraint::Min(0),
+        Constraint::Length(log_h),
         Constraint::Length(1),
     ])
     .areas(area);
 
     draw_header(buf, header, app);
-    if area.width >= 104 {
-        let [graph, side] =
-            Layout::horizontal([Constraint::Min(60), Constraint::Length(40)]).areas(body);
-        let [inspect, roster] =
-            Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)]).areas(side);
-        draw_graph(buf, graph, app);
-        draw_inspector(buf, inspect, app);
-        draw_roster(buf, roster, app);
+    if app.panes.maximised {
+        let full = body.union(log);
+        match app.panes.focus {
+            Panel::Graph => draw_graph(buf, full, app),
+            Panel::Inspector => draw_inspector(buf, full, app),
+            Panel::Roster => draw_roster(buf, full, app),
+            Panel::Stream => draw_log(buf, full, app),
+        }
     } else {
-        draw_graph(buf, body, app);
+        if app.panes.side_shown {
+            let side_w = side_width(app.panes.side_w, area.width);
+            let [graph, side] =
+                Layout::horizontal([Constraint::Min(0), Constraint::Length(side_w)]).areas(body);
+            let [inspect, roster] =
+                Layout::vertical([Constraint::Percentage(60), Constraint::Percentage(40)])
+                    .areas(side);
+            draw_graph(buf, graph, app);
+            draw_inspector(buf, inspect, app);
+            draw_roster(buf, roster, app);
+        } else {
+            draw_graph(buf, body, app);
+        }
+        draw_log(buf, log, app);
     }
-    draw_log(buf, log, app);
-    let keys = " ↑↓ select  f follow  c cost  space pause  +/- speed  r replay  l live  ? help  esc sessions  q quit";
-    buf.set_stringn(footer.x, footer.y, keys, footer.width as usize, fg(fx::DIM));
+    draw_footer(buf, footer, app);
     if app.help {
         draw_help(buf, area);
     }
+}
+
+fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
+    let p = &app.panes;
+    let width = area.width as usize;
+    if p.input {
+        // `/query█`, keeping the end of a long query in view.
+        let hint = "   enter search · esc cancel";
+        let room = width
+            .saturating_sub(2 + hint.chars().count())
+            .max(width / 2);
+        let line = Line::from(vec![
+            Span::styled("/", bold(fx::CYAN)),
+            Span::styled(tail_fit(&p.query, room).to_string(), bold(fx::WHITE)),
+            Span::styled("█", fg(fx::CYAN)),
+            Span::styled(hint, fg(fx::DIM)),
+        ]);
+        line.render(area, buf);
+        return;
+    }
+    let keys = " tab focus  z full  ↑↓ select/scroll  / search  [ ] < > resize  f follow  c cost  space pause  +/- speed  r replay  l live  ? help  esc back  q quit";
+    let mut spans = Vec::new();
+    if !p.query.is_empty() {
+        let grep = if p.filter { "& all lines" } else { "& grep" };
+        spans.extend([
+            Span::styled(" /", bold(fx::CYAN)),
+            Span::styled(head_fit(&p.query, 24), bold(fx::WHITE)),
+            Span::styled(
+                format!("  n/N older/newer  {grep}  esc clear │"),
+                fg(fx::DIM),
+            ),
+        ]);
+    }
+    spans.push(Span::styled(keys, fg(fx::DIM)));
+    Line::from(spans).render(area, buf);
 }
 
 fn draw_header(buf: &mut Buffer, area: Rect, app: &App) {
@@ -235,7 +343,13 @@ fn packet_color(kind: PacketKind) -> Rgb {
 }
 
 fn draw_graph(buf: &mut Buffer, area: Rect, app: &mut App) {
-    let block = panel(" NEURAL TOPOLOGY ");
+    let block = pane_for(
+        " NEURAL TOPOLOGY ",
+        app,
+        Panel::Graph,
+        area.width,
+        Vec::new(),
+    );
     let inner = block.inner(area);
     block.render(area, buf);
     if inner.width < 30 || inner.height < 8 {
@@ -577,12 +691,57 @@ fn draw_node(
 
 // --------------------------------------------------------------- side panes
 
-fn draw_inspector(buf: &mut Buffer, area: Rect, app: &App) {
-    let block = panel(" INSPECT ");
+/// Longest prompt or output the full-size inspector shows, in chars.
+const FULL_TEXT_MAX: usize = 100_000;
+
+/// Prompt or output text for the inspector. Normal size: one cleaned line.
+/// Full size: the whole text, line breaks kept.
+fn inspect_text(text: &str, full: bool) -> Vec<Line<'static>> {
+    let style = fg(fx::TEXT.scale(0.8));
+    if !full {
+        return vec![Line::from(Span::styled(clean(text, 150), style))];
+    }
+    let mut text = text;
+    if let Some((cut, _)) = text.char_indices().nth(FULL_TEXT_MAX) {
+        text = &text[..cut];
+    }
+    text.lines()
+        .map(|l| Line::from(Span::styled(clean(l, FULL_TEXT_MAX), style)))
+        .collect()
+}
+
+fn draw_inspector(buf: &mut Buffer, area: Rect, app: &mut App) {
+    let rows = inspector_rows(area, app);
+    let inner_h = area.height.saturating_sub(2) as usize;
+    let max = rows.len().saturating_sub(inner_h);
+    app.panes.inspect_rows = inner_h;
+    app.panes.inspect_max = max;
+    let scroll = app.panes.inspect_scroll.min(max);
+    let mut right = Vec::new();
+    if max > 0 {
+        let pos = format!(" ↕ {}/{} ", scroll + inner_h.min(rows.len()), rows.len());
+        right.push((1, Span::styled(pos, fg(fx::DIM))));
+    }
+    let block = pane_for(" INSPECT ", app, Panel::Inspector, area.width, right);
+    let inner = block.inner(area);
+    block.render(area, buf);
+    for (i, row) in rows
+        .iter()
+        .skip(scroll)
+        .take(inner.height as usize)
+        .enumerate()
+    {
+        row.render(Rect::new(inner.x, inner.y + i as u16, inner.width, 1), buf);
+    }
+}
+
+/// The inspector's content, wrapped to the panel's inner width.
+fn inspector_rows(area: Rect, app: &App) -> Vec<Line<'static>> {
+    let width = area.width.saturating_sub(2) as usize;
+    let full = app.panes.maximised && app.panes.focus == Panel::Inspector;
     let w = &app.world;
     let Some(a) = w.order.get(app.selected).and_then(|id| w.agents.get(id)) else {
-        block.render(area, buf);
-        return;
+        return Vec::new();
     };
     let color = agent_color(a);
     let (glyph, status, sc) = status_style(w, a);
@@ -643,16 +802,11 @@ fn draw_inspector(buf: &mut Buffer, area: Rect, app: &App) {
     if a.id == ROOT {
         lines.push(kv("SUBS", subagent_share(w)));
     }
-    lines.extend([
-        rule("PROMPT"),
-        Line::from(Span::styled(clean(&a.prompt, 150), fg(fx::TEXT.scale(0.8)))),
-        rule("LAST OUTPUT"),
-        Line::from(Span::styled(
-            clean(&a.last_text, 150),
-            fg(fx::TEXT.scale(0.8)),
-        )),
-        rule("TOOLS"),
-    ]);
+    lines.push(rule("PROMPT"));
+    lines.extend(inspect_text(&a.prompt, full));
+    lines.push(rule("LAST OUTPUT"));
+    lines.extend(inspect_text(&a.last_text, full));
+    lines.push(rule("TOOLS"));
     if let Some(reason) = w.health_reason(a) {
         let line = Line::from(vec![
             Span::styled(format!("{:<8}", "HEALTH"), fg(fx::DIM)),
@@ -663,16 +817,60 @@ fn draw_inspector(buf: &mut Buffer, area: Rect, app: &App) {
     for t in a.recent_tools.iter().rev() {
         lines.push(Line::from(vec![
             Span::styled("▸ ", fg(fx::CYAN)),
-            Span::styled(
-                clean(t, area.width.saturating_sub(5) as usize),
-                fg(fx::TEXT.scale(0.8)),
-            ),
+            Span::styled(clean(t, width.saturating_sub(3)), fg(fx::TEXT.scale(0.8))),
         ]));
     }
-    Paragraph::new(lines)
-        .wrap(Wrap { trim: true })
-        .block(block)
-        .render(area, buf);
+    lines.iter().flat_map(|l| wrap_line(l, width)).collect()
+}
+
+/// Word-wraps a styled line to `width` display cells. Breaks at the last
+/// space that fits, or inside a word longer than the width; drops the space
+/// at a break. Never splits a character.
+fn wrap_line(line: &Line, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let cells: Vec<(char, Style)> = line
+        .spans
+        .iter()
+        .flat_map(|s| s.content.chars().map(move |c| (c, s.style)))
+        .collect();
+    let cw = |c: char| c.width().unwrap_or(0);
+    let mut rows: Vec<Vec<(char, Style)>> = Vec::new();
+    let mut cur: Vec<(char, Style)> = Vec::new();
+    for (c, st) in cells {
+        while !cur.is_empty() && cur.iter().map(|x| cw(x.0)).sum::<usize>() + cw(c) > width {
+            match cur.iter().rposition(|x| x.0 == ' ').filter(|&i| i > 0) {
+                Some(sp) => {
+                    let rest = cur.split_off(sp + 1);
+                    cur.pop();
+                    rows.push(std::mem::replace(&mut cur, rest));
+                }
+                None => rows.push(std::mem::take(&mut cur)),
+            }
+            // A row that starts after a break has no leading space.
+            while cur.first().is_some_and(|x| x.0 == ' ') {
+                cur.remove(0);
+            }
+        }
+        if c == ' ' && cur.is_empty() && !rows.is_empty() {
+            continue;
+        }
+        cur.push((c, st));
+    }
+    rows.push(cur);
+    rows.into_iter()
+        .map(|row| {
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (c, st) in row {
+                match spans.last_mut() {
+                    Some(s) if s.style == st => s.content.to_mut().push(c),
+                    _ => spans.push(Span::styled(c.to_string(), st)),
+                }
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 fn draw_roster(buf: &mut Buffer, area: Rect, app: &App) {
@@ -685,7 +883,7 @@ fn draw_roster(buf: &mut Buffer, area: Rect, app: &App) {
     } else {
         " ROSTER "
     };
-    let block = panel(follow);
+    let block = pane_for(follow, app, Panel::Roster, area.width, Vec::new());
     let inner = block.inner(area);
     block.render(area, buf);
     let w = &app.world;
@@ -749,7 +947,7 @@ fn subagent_share(w: &World) -> String {
 }
 
 fn draw_cost_by_type(buf: &mut Buffer, area: Rect, app: &App) {
-    let block = panel(" COST BY TYPE ");
+    let block = pane_for(" COST BY TYPE ", app, Panel::Roster, area.width, Vec::new());
     let inner = block.inner(area);
     block.render(area, buf);
     let rows = inner.height as usize;
@@ -788,17 +986,63 @@ fn draw_cost_by_type(buf: &mut Buffer, area: Rect, app: &App) {
     }
 }
 
-fn draw_log(buf: &mut Buffer, area: Rect, app: &App) {
-    let block = panel(" EVENT STREAM ");
+fn draw_log(buf: &mut Buffer, area: Rect, app: &mut App) {
+    let rows = area.height.saturating_sub(2) as usize;
+    app.panes.stream_rows = rows;
+    let p = &app.panes;
+    // Right of the title: paused state, then the search.
+    let mut status: Vec<(u8, Span)> = Vec::new();
+    if p.anchor.is_some() {
+        let new = app.new_lines();
+        let text = if new > 0 {
+            format!(" ⏸ PAUSED +{new} new ")
+        } else {
+            " ⏸ PAUSED ".to_string()
+        };
+        status.push((3, Span::styled(text, bold(fx::YELLOW))));
+        status.push((1, Span::styled("· G tail ", fg(fx::YELLOW))));
+    }
+    let n = needle(&p.query);
+    let matches = if p.query.is_empty() {
+        Vec::new()
+    } else {
+        app.matches()
+    };
+    if !p.query.is_empty() {
+        let at = p
+            .current
+            .and_then(|c| matches.iter().position(|&i| app.log_no(i) == c))
+            .map_or("-".to_string(), |i| (i + 1).to_string());
+        let grep = if app.filtering() { " grep" } else { "" };
+        status.push((
+            2,
+            Span::styled(
+                format!(" /{} {at}/{}{grep} ", head_fit(&p.query, 20), matches.len()),
+                bold(fx::MAGENTA),
+            ),
+        ));
+    }
+    let block = pane_for(" EVENT STREAM ", app, Panel::Stream, area.width, status);
     let inner = block.inner(area);
     block.render(area, buf);
+
     let w = &app.world;
-    let rows = inner.height as usize;
-    let skip = w.log.len().saturating_sub(rows);
-    for (i, l) in w.log.iter().skip(skip).enumerate() {
-        let Some(a) = w.agents.get(&l.agent) else {
-            continue;
-        };
+    let list = if app.filtering() {
+        matches
+    } else {
+        (0..w.log.len()).collect()
+    };
+    let Some(bottom) = app.stream_bottom(&list) else {
+        return;
+    };
+    let start = (bottom + 1).saturating_sub(rows);
+    let shown = &list[start..=bottom];
+    // Older lines recede while following; reading back, all are bright.
+    let fade_on = p.anchor.is_none() && !p.maximised;
+    let hit = bold(fx::BG).bg(fx::MAGENTA.scale(0.8).c());
+    let current_hit = bold(fx::BG).bg(fx::YELLOW.c());
+    for (row, &i) in shown.iter().enumerate() {
+        let l = &w.log[i];
         let (mark, color) = match l.kind {
             LogKind::Spawn => ("✦", fx::MAGENTA),
             LogKind::Done => ("✔", fx::GREEN),
@@ -810,60 +1054,147 @@ fn draw_log(buf: &mut Buffer, area: Rect, app: &App) {
             LogKind::Prompt => ("❯", fx::WHITE),
             LogKind::Health => (HEALTH_GLYPH, fx::ORANGE),
         };
-        let age = (rows - (w.log.len() - skip - i)) as f32 / rows.max(1) as f32;
-        let fade = 0.55 + 0.45 * age; // older lines recede
-        let line = Line::from(vec![
-            Span::styled(format!("{} ", fmt_clock(l.ts)), fg(fx::DIM)),
-            Span::styled(
-                format!("{:<14} ", clean(&a.agent_type, 14)),
-                fg(agent_color(a).scale(fade)),
-            ),
-            Span::styled(format!("{mark} "), fg(color)),
-            Span::styled(l.text.as_str(), fg(fx::TEXT.scale(fade))),
-        ]);
-        line.render(Rect::new(inner.x, inner.y + i as u16, inner.width, 1), buf);
+        let age = (rows - (shown.len() - row)) as f32 / rows.max(1) as f32;
+        let fade = if fade_on { 0.55 + 0.45 * age } else { 1.0 };
+        let who_color = w.agents.get(&l.agent).map_or(fx::DIM, agent_color);
+        let hl = if p.current == Some(app.log_no(i)) {
+            current_hit
+        } else {
+            hit
+        };
+        let mut spans = vec![Span::styled(format!("{} ", fmt_clock(l.ts)), fg(fx::DIM))];
+        let who = format!("{:<14} ", log_who(w, l));
+        spans.extend(highlight(&who, &n, fg(who_color.scale(fade)), hl));
+        spans.push(Span::styled(format!("{mark} "), fg(color)));
+        spans.extend(highlight(&l.text, &n, fg(fx::TEXT.scale(fade)), hl));
+        let y = inner.y + row as u16;
+        Line::from(spans).render(Rect::new(inner.x, y, inner.width, 1), buf);
     }
 }
 
+/// `text` as spans in `base` style, with each case-insensitive match of
+/// `needle` in `hit` style. Splits only between chars.
+fn highlight(text: &str, needle: &[char], base: Style, hit: Style) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut at = 0; // char position
+    let mut rest = text;
+    for (a, b) in find_ci(text, needle) {
+        let (before, tail) = split_chars(rest, a - at);
+        let (word, after) = split_chars(tail, b - a);
+        if !before.is_empty() {
+            out.push(Span::styled(before.to_string(), base));
+        }
+        out.push(Span::styled(word.to_string(), hit));
+        rest = after;
+        at = b;
+    }
+    if !rest.is_empty() || out.is_empty() {
+        out.push(Span::styled(rest.to_string(), base));
+    }
+    out
+}
+
+/// The start of `s` that fits in `width` display cells, with `…` when cut.
+/// Wide characters are kept whole, unlike `clean`, which replaces them.
+fn head_fit(s: &str, width: usize) -> String {
+    if s.chars().map(|c| c.width().unwrap_or(0)).sum::<usize>() <= width {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in s.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w + 1 > width {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    out.push('…');
+    out
+}
+
+/// Splits after `n` chars.
+fn split_chars(s: &str, n: usize) -> (&str, &str) {
+    let cut = s.char_indices().nth(n).map_or(s.len(), |(i, _)| i);
+    s.split_at(cut)
+}
+
+const HELP: [&str; 31] = [
+    "tab / S-tab  focus next / previous panel",
+    "z            full size focused panel, again",
+    "             or esc to restore",
+    "↑ ↓ / j k    graph, roster: select agent",
+    "             stream, inspector: scroll",
+    "PgUp PgDn    the same, a page at a time",
+    "g G          stream oldest / newest line",
+    "Home End     (inspector when it has focus)",
+    "[ ]          shorter / taller event stream",
+    "< >          narrower / wider side column",
+    "",
+    "/            search the event stream:",
+    "             agent type or text, ignoring",
+    "             case; enter keeps, esc drops",
+    "n N          older / newer match",
+    "&            show matching lines only",
+    "",
+    "f            follow most recent activity",
+    "c            roster: cost by agent type",
+    "space        pause or resume replay",
+    "+ / -        replay speed",
+    "r            replay session from start",
+    "l            jump to end, follow live",
+    "esc          one step back: query line, full",
+    "             size, search, then session list",
+    "q            quit",
+    "",
+    "◆ magenta packet   spawn",
+    "◆ green packet     result returned",
+    "◆ yellow packet    message between agents",
+    "◆ red packet       failure",
+];
+
 fn draw_help(buf: &mut Buffer, area: Rect) {
-    let lines = [
-        "↑ ↓ / j k    select agent",
-        "f            follow most recent activity",
-        "c            roster: cost by agent type",
-        "space        pause or resume replay",
-        "+ / -        replay speed",
-        "r            replay session from start",
-        "l            jump to end, follow live",
-        "esc          back to session list",
-        "q            quit",
-        "",
-        "◆ magenta packet   spawn",
-        "◆ green packet     result returned",
-        "◆ yellow packet    message between agents",
-        "◆ red packet       failure",
-    ];
-    let (w, h) = (46u16.min(area.width), lines.len() as u16 + 2);
+    // One column when it fits, else two side by side, else cut at the bottom.
+    let col_w = 46u16;
+    let cols = if HELP.len() as u16 + 2 > area.height && area.width >= col_w * 2 + 2 {
+        2
+    } else {
+        1
+    };
+    let per = HELP.len().div_ceil(cols as usize);
+    let w = (col_w * cols + 2).min(area.width);
+    let h = (per as u16 + 2).min(area.height);
     let rect = Rect::new(
         area.x + (area.width - w) / 2,
-        area.y + area.height.saturating_sub(h) / 2,
+        area.y + (area.height - h) / 2,
         w,
         h,
     );
     Clear.render(rect, buf);
     buf.set_style(rect, Style::default().bg(fx::BG.c()));
-    let text: Vec<Line> = lines
-        .iter()
-        .map(|l| Line::from(Span::styled(format!(" {l}"), fg(fx::TEXT))))
-        .collect();
-    Paragraph::new(text)
-        .block(panel(" HELP ").border_style(fg(fx::CYAN)))
-        .render(rect, buf);
+    let block = panel(" HELP ").border_style(fg(fx::CYAN));
+    let inner = block.inner(rect);
+    block.render(rect, buf);
+    for (c, chunk) in HELP.chunks(per).enumerate() {
+        let x = inner.x + c as u16 * col_w;
+        if x >= inner.right() {
+            break;
+        }
+        let col = Rect::new(x, inner.y, (inner.right() - x).min(col_w), inner.height);
+        let text: Vec<Line> = chunk
+            .iter()
+            .map(|l| Line::from(Span::styled(format!(" {l}"), fg(fx::TEXT))))
+            .collect();
+        Paragraph::new(text).render(col, buf);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::demo::DemoSource;
+    use crate::event::{Event, Kind};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -911,6 +1242,207 @@ mod tests {
                 frame(&mut app, w, h);
                 app.tick(1.0 / 30.0);
                 app.cost_view = !app.cost_view;
+            }
+        }
+    }
+
+    /// Puts the panes in view state number `k`: every focus, normal and full
+    /// size, stream at the tail, the top or a bogus line, inspector scrolled
+    /// past its end, with and without a search (wide chars too) and grep.
+    fn pane_state(app: &mut App, k: usize) {
+        const FOCUS: [Panel; 4] = [Panel::Graph, Panel::Inspector, Panel::Roster, Panel::Stream];
+        app.panes.focus = FOCUS[k % 4];
+        app.panes.maximised = (k / 4) % 2 == 1;
+        app.stream_tail();
+        match (k / 8) % 3 {
+            0 => {}
+            1 => app.stream_top(),
+            _ => app.panes.anchor = Some(if k.is_multiple_of(2) { 0 } else { u64::MAX }),
+        }
+        app.panes.inspect_scroll = if k.is_multiple_of(3) { usize::MAX } else { 0 };
+        app.search_clear();
+        match (k / 24) % 4 {
+            0 => {}
+            1 => app.panes.query = "read".into(),
+            2 => {
+                app.panes.query = "本e".into();
+                app.panes.input = true;
+            }
+            _ => {
+                app.panes.query = "e".into();
+                app.panes.filter = true;
+                app.search_step(true);
+            }
+        }
+        app.panes.stream_h = [9, 1, 200][k % 3];
+        app.panes.side_w = [40, 0, 500][(k / 3) % 3];
+    }
+
+    #[test]
+    fn never_panics_in_any_pane_state_at_any_size() {
+        let mut app = busy_app();
+        // Text with wide and zero-width characters, in the stream and the
+        // inspector.
+        let wide = "日本語のテキスト 🦀 e\u{301} wide";
+        for (i, kind) in [
+            Kind::Text {
+                agent: ROOT.into(),
+                text: wide.into(),
+            },
+            Kind::Prompt {
+                agent: ROOT.into(),
+                text: format!("{wide}\n\nline two {}", "long ".repeat(400)),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let ts = app.world.now_ts + i as i64;
+            app.world.apply(&Event { ts, kind }, false);
+        }
+        app.selected = 0;
+        let mut k = 0;
+        for w in (1..220).step_by(7) {
+            for h in (1..70).step_by(3) {
+                for _ in 0..2 {
+                    pane_state(&mut app, k);
+                    app.help = k.is_multiple_of(5);
+                    frame(&mut app, w, h);
+                    k += 1;
+                }
+                app.tick(1.0 / 30.0);
+            }
+        }
+        // 96 states, each at about 15 different sizes.
+        assert!(k >= 96 * 15, "every pane state ran");
+    }
+
+    #[test]
+    fn wrap_line_respects_width_and_never_splits_a_char() {
+        let style = Style::default();
+        let line = Line::from(vec![
+            Span::styled("hello wide ", style),
+            Span::styled("日本語日本語", bold(fx::CYAN)),
+            Span::styled(" averyveryverylongword end", style),
+        ]);
+        for width in 1..30 {
+            let rows = wrap_line(&line, width);
+            let text: String = rows
+                .iter()
+                .flat_map(|r| r.spans.iter().map(|s| s.content.to_string()))
+                .collect();
+            for r in &rows {
+                assert!(r.width() <= width.max(2), "width {width}: {r:?}");
+            }
+            // Only break spaces go missing.
+            assert_eq!(
+                text.replace(' ', ""),
+                "hellowide日本語日本語averyveryverylongwordend"
+            );
+        }
+        let rows = wrap_line(&line, 12);
+        assert_eq!(rows[0].to_string(), "hello wide");
+        assert!(wrap_line(&line, 0).is_empty());
+        assert_eq!(wrap_line(&Line::from(""), 10).len(), 1, "blank lines stay");
+    }
+
+    #[test]
+    fn head_fit_keeps_wide_chars_whole() {
+        assert_eq!(head_fit("read", 20), "read");
+        assert_eq!(head_fit("日本語のテキスト", 7), "日本語…");
+        assert_eq!(head_fit("abcdef", 4), "abc…");
+        for w in 1..12 {
+            assert!(Span::raw(head_fit("日本語のテキスト", w)).width() <= w.max(1));
+        }
+    }
+
+    #[test]
+    fn highlight_marks_whole_chars() {
+        let (base, hit) = (fg(fx::TEXT), fg(fx::RED));
+        let spans = highlight("Read 日本 read", &needle("本 r"), base, hit);
+        let parts: Vec<(&str, bool)> = spans
+            .iter()
+            .map(|s| (s.content.as_ref(), s.style == hit))
+            .collect();
+        assert_eq!(
+            parts,
+            vec![("Read 日", false), ("本 r", true), ("ead", false)]
+        );
+        let none = highlight("abc", &[], base, hit);
+        assert_eq!(none.len(), 1);
+        assert_eq!(highlight("", &needle("x"), base, hit).len(), 1);
+    }
+
+    /// Frames for review: `cargo test review_frames -- --nocapture` prints
+    /// the default view, the stream focused and scrolled back, the stream
+    /// full size with a search, and the inspector full size.
+    #[test]
+    fn review_frames() {
+        for (w, h) in [(140, 40), (100, 30), (60, 16)] {
+            let mut app = busy_app();
+            frame(&mut app, w, h);
+            app.tick(1.0 / 30.0);
+            let default = frame(&mut app, w, h);
+            assert!(default.contains("▸ NEURAL TOPOLOGY"), "graph has focus");
+
+            app.panes.focus = Panel::Stream;
+            app.scroll_stream(-app.stream_page());
+            app.scroll_stream(-3);
+            for _ in 0..90 {
+                app.tick(1.0 / 30.0);
+            }
+            let scrolled = frame(&mut app, w, h);
+            assert!(scrolled.contains("PAUSED"), "{scrolled}");
+
+            app.stream_tail();
+            app.panes.maximised = true;
+            app.search_open();
+            app.panes.query = "read".into();
+            app.search_confirm();
+            app.panes.filter = true;
+            frame(&mut app, w, h);
+            let search = frame(&mut app, w, h);
+            assert!(search.contains("/read"), "{search}");
+            assert!(search.contains("z restore") || w < 100, "{search}");
+
+            app.search_clear();
+            app.panes.focus = Panel::Inspector;
+            app.follow = false;
+            app.selected = 0;
+            let prompt = "Refactor the retry module.\n\nKeep the public API. Run the whole \
+                          test suite after each step and stop at the first failure; report \
+                          which call sites changed and why.\n- step one\n- step two";
+            let kind = Kind::Prompt {
+                agent: ROOT.into(),
+                text: prompt.into(),
+            };
+            app.world.apply(&Event { ts: 0, kind }, false);
+            let inspector = frame(&mut app, w, h);
+            assert!(inspector.contains("INSPECT"));
+            if h >= 30 {
+                assert!(
+                    inspector.contains("- step two"),
+                    "whole prompt: {inspector}"
+                );
+            }
+            app.panes.maximised = false;
+            app.search_open();
+            app.panes.query = "日本 read".into();
+            let typing = frame(&mut app, w, h);
+            assert!(typing.contains("enter search"), "{typing}");
+            app.search_clear();
+            app.help = true;
+            let help = frame(&mut app, w, h);
+            assert!(help.contains("HELP"));
+            for (name, f) in [
+                ("default", default),
+                ("stream focused, scrolled back", scrolled),
+                ("stream full size, search \"read\" + grep", search),
+                ("inspector full size", inspector),
+                ("typing a query", typing),
+                ("help", help),
+            ] {
+                println!("--- {w}x{h} {name}\n{f}");
             }
         }
     }
