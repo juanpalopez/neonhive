@@ -224,7 +224,7 @@ fn watch_session(session: Option<&Path>, opts: &watch::Opts) -> i32 {
 
 fn watch_loop(session: Option<&Path>, opts: &watch::Opts) -> anyhow::Result<i32> {
     use std::io::Write;
-    let sessions = claude::sessions();
+    let sessions = all_sessions();
     let (path, info) = match session {
         Some(p) => {
             anyhow::ensure!(p.is_file(), "no such session file: {}", p.display());
@@ -235,7 +235,7 @@ fn watch_loop(session: Option<&Path>, opts: &watch::Opts) -> anyhow::Result<i32>
         None => {
             let first = sessions
                 .first()
-                .ok_or_else(|| anyhow::anyhow!("no Claude Code sessions found"))?;
+                .ok_or_else(|| anyhow::anyhow!("no Claude Code or Codex sessions found"))?;
             (first.path.clone(), Some(first))
         }
     };
@@ -248,7 +248,7 @@ fn watch_loop(session: Option<&Path>, opts: &watch::Opts) -> anyhow::Result<i32>
     };
     let mut world = state::World::new(&title);
     let mut watcher = watch::Watcher::new(opts.max_tokens, opts.max_cost);
-    let mut source = ClaudeSource::open(&path);
+    let mut source = source(&path);
     let mut idle = watch::Idle::new(opts.idle_exit, util::now_ms());
     let mut fired = false;
     let mut out = std::io::stdout().lock();
