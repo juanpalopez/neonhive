@@ -82,6 +82,7 @@ and after your change. For visual changes, please include a before and after.
 | `src/claude.rs` | Claude Code adapter: transcript parsing, tailing, session discovery |
 | `src/demo.rs` | Synthetic adapter |
 | `src/state.rs` | World state, built by applying events |
+| `src/pricing.rs` | Price table and cost estimates |
 | `src/app.rs` | Playback clock, graph layout, animation state |
 | `src/ui.rs` | Rendering |
 | `src/picker.rs` | Session list screen |

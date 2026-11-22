@@ -4,6 +4,7 @@ mod demo;
 mod event;
 mod fx;
 mod picker;
+mod pricing;
 mod report;
 mod state;
 mod svg;
@@ -58,6 +59,10 @@ struct Args {
     /// Frame size for --snapshot.
     #[arg(long, default_value = "140x40", value_name = "WxH")]
     size: String,
+    /// JSON file of token prices (USD per million) that replace or extend the
+    /// built-in table used for cost estimates.
+    #[arg(long, value_name = "FILE")]
+    prices: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -76,6 +81,9 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     if let Some(Command::Report { session, json }) = &args.command {
         return report(session.as_deref(), *json);
+    }
+    if let Some(file) = &args.prices {
+        pricing::load(file)?;
     }
     let colorterm = std::env::var("COLORTERM").unwrap_or_default();
     fx::set_truecolor(
@@ -224,6 +232,7 @@ fn view(term: &mut DefaultTerminal, mut app: App) -> anyhow::Result<bool> {
             KeyCode::PageUp => app.select(-10),
             KeyCode::PageDown => app.select(10),
             KeyCode::Char('f') => app.follow = !app.follow,
+            KeyCode::Char('c') => app.cost_view = !app.cost_view,
             KeyCode::Char(' ') => app.paused = !app.paused,
             KeyCode::Char('+' | '=') => {
                 app.speed_idx = (app.speed_idx + 1).min(SPEEDS.len() - 1);

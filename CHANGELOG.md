@@ -9,6 +9,7 @@ All notable changes to this project are recorded here. The format follows
 ### Added
 
 - `neonhive report [SESSION] [--json]`: prints a Markdown or JSON summary of a session (header, token split, agent table, most used tools, failures) without opening the UI. Defaults to the most recent session. Reports contain labels and tool names, never prompts.
+- Cost estimates: per agent in the inspector, for the session in the header (`COST ~$…`), the subagents' share in the main agent's inspector, and a cost-by-agent-type view of the roster (`c`). Prices come from a built-in table of Claude list prices (taken 2026-11-22); `--prices FILE` replaces or extends it. Agents on a model with no known price show tokens only.
 
 ### Changed
 

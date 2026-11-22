@@ -82,6 +82,17 @@ pub fn fmt_tokens(n: u64) -> String {
     }
 }
 
+/// An estimated amount in USD, prefixed with `~`.
+pub fn fmt_usd(usd: f64) -> String {
+    if usd >= 1_000.0 {
+        format!("~${usd:.0}")
+    } else if usd >= 100.0 {
+        format!("~${usd:.1}")
+    } else {
+        format!("~${usd:.2}")
+    }
+}
+
 pub fn fmt_dur(ms: i64) -> String {
     let s = (ms.max(0)) / 1000;
     if s >= 3600 {
@@ -112,6 +123,10 @@ mod tests {
         assert_eq!(fmt_dur(65_000), "01:05");
         assert_eq!(fmt_dur(3_725_000), "1:02:05");
         assert_eq!(fmt_dur(-5), "00:00");
+        assert_eq!(fmt_usd(1.236), "~$1.24");
+        assert_eq!(fmt_usd(0.0), "~$0.00");
+        assert_eq!(fmt_usd(123.45), "~$123.5");
+        assert_eq!(fmt_usd(4_321.0), "~$4321");
     }
 
     #[test]

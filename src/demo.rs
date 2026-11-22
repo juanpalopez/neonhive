@@ -129,15 +129,23 @@ impl DemoSource {
                 agent,
                 text: TEXTS[self.rand(TEXTS.len() as u32) as usize].into(),
             },
-            4..=7 => Kind::Usage {
-                agent,
+            n @ 4..=7 => Kind::Usage {
+                // The main agent and its subagents run on different models,
+                // so the demo shows a cost split. Prices come from the
+                // built-in table; these are real model ids.
+                model: if n == 7 {
+                    "claude-opus-5-5"
+                } else {
+                    "claude-sonnet-5-5"
+                }
+                .into(),
+                agent: if n == 7 { ROOT.into() } else { agent },
                 tokens: Tokens {
                     input: 40 + self.rand(300) as u64,
                     output: 300 + self.rand(2_000) as u64,
                     cache_read: 20_000 + self.rand(60_000) as u64,
                     cache_write: self.rand(4_000) as u64,
                 },
-                model: "demo-model".into(),
             },
             8 => Kind::Tool {
                 agent: ROOT.into(),

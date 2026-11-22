@@ -79,6 +79,12 @@ bounded log and running totals. It is tolerant of disorder:
 - Activity from a finished agent marks it running again (it was resumed).
 - A `Finish` for an unknown id is dropped (background shell tasks send the same notification as agents).
 
+Cost is derived, not stored: `Agent::cost` prices each entry of the agent's
+per-model token split with `pricing::cost`, and `World::cost_summary` and
+`World::cost_by_type` add those up. `src/pricing.rs` holds the price table as
+data (model id families and their rates), merged with an optional `--prices`
+file; nothing else knows which vendor a model belongs to.
+
 `apply` also queues animation requests (`Fx`): a packet between two agents or a
 flash on one. When history is loaded in bulk these are suppressed.
 

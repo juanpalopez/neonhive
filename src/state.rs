@@ -1,6 +1,7 @@
 //! World state: a reducer over the normalized event stream.
 
 use crate::event::{Event, Kind, Tokens, ROOT};
+use crate::pricing;
 use crate::util::clean;
 use std::collections::{HashMap, VecDeque};
 
@@ -353,6 +354,102 @@ impl World {
     }
 }
 
+// --------------------------------------------------------------------- cost
+
+impl Agent {
+    /// Estimated cost in USD, summed over the models this agent used. None
+    /// when any of them has no known price, or when only a reported total is
+    /// known (it has no model split to price).
+    pub fn cost(&self) -> Option<f64> {
+        if self.tokens.is_zero() && self.reported_tokens.is_some() {
+            return None;
+        }
+        let mut usd = 0.0;
+        for (model, t) in &self.by_model {
+            if !t.is_zero() {
+                usd += pricing::cost(model, t)?;
+            }
+        }
+        Some(usd)
+    }
+}
+
+/// Session cost split between the top-level agent and its subagents. Agents
+/// without a price are left out of the sums and counted in `unpriced`.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct CostSummary {
+    pub main: f64,
+    pub subagents: f64,
+    /// Agents that used tokens of a model with no known price.
+    pub unpriced: usize,
+}
+
+impl CostSummary {
+    pub fn total(&self) -> f64 {
+        self.main + self.subagents
+    }
+
+    /// Share of the priced total spent by subagents, 0..1.
+    pub fn subagent_share(&self) -> Option<f64> {
+        (self.total() > 0.0).then(|| self.subagents / self.total())
+    }
+}
+
+/// Totals for one agent type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeCost {
+    pub agent_type: String,
+    pub agents: usize,
+    pub tokens: u64,
+    /// Sum over agents of this type that have a price.
+    pub usd: f64,
+    pub unpriced: usize,
+}
+
+impl World {
+    pub fn cost_summary(&self) -> CostSummary {
+        let mut s = CostSummary::default();
+        for a in self.agents.values() {
+            match a.cost() {
+                Some(c) if a.id == ROOT => s.main += c,
+                Some(c) => s.subagents += c,
+                None => s.unpriced += 1,
+            }
+        }
+        s
+    }
+
+    /// One row per agent type, most expensive first; ties keep spawn order.
+    pub fn cost_by_type(&self) -> Vec<TypeCost> {
+        let mut rows: Vec<TypeCost> = Vec::new();
+        for id in &self.order {
+            let a = &self.agents[id];
+            let i = match rows.iter().position(|r| r.agent_type == a.agent_type) {
+                Some(i) => i,
+                None => {
+                    rows.push(TypeCost {
+                        agent_type: a.agent_type.clone(),
+                        agents: 0,
+                        tokens: 0,
+                        usd: 0.0,
+                        unpriced: 0,
+                    });
+                    rows.len() - 1
+                }
+            };
+            let row = &mut rows[i];
+            row.agents += 1;
+            row.tokens += a.shown_tokens();
+            match a.cost() {
+                Some(c) => row.usd += c,
+                None => row.unpriced += 1,
+            }
+        }
+        rows.sort_by(|a, b| b.usd.total_cmp(&a.usd));
+        rows
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,5 +664,89 @@ mod tests {
             w.apply(&ev(i, tool(ROOT)), false);
         }
         assert_eq!(w.log.len(), LOG_CAP);
+    }
+
+    fn spawn_typed(id: &str, agent_type: &str) -> Kind {
+        Kind::Spawn {
+            id: id.into(),
+            parent: ROOT.into(),
+            agent_type: agent_type.into(),
+            label: String::new(),
+        }
+    }
+
+    fn million_in(agent: &str, model: &str) -> Kind {
+        usage(agent, model, 1_000_000, 0)
+    }
+
+    #[test]
+    fn agent_cost_sums_over_models() {
+        let mut w = World::new("proj");
+        w.apply(&ev(10, spawn("a1", ROOT)), false);
+        w.apply(&ev(11, million_in("a1", "claude-opus-5-5")), false); // $4
+        w.apply(&ev(12, million_in("a1", "claude-sonnet-5-5")), false); // $2
+        let c = w.agents["a1"].cost().unwrap();
+        assert!((c - 6.0).abs() < 1e-9, "{c}");
+        // One unpriced model makes the whole agent unpriced.
+        w.apply(&ev(13, million_in("a1", "mystery")), false);
+        assert_eq!(w.agents["a1"].cost(), None);
+    }
+
+    #[test]
+    fn agent_with_only_a_reported_total_has_no_cost() {
+        let mut w = World::new("proj");
+        w.apply(&ev(10, spawn("a1", ROOT)), false);
+        assert_eq!(w.agents["a1"].cost(), Some(0.0));
+        let finish = Kind::Finish {
+            id: "a1".into(),
+            ok: true,
+            tokens: Some(5_000),
+        };
+        w.apply(&ev(11, finish), false);
+        assert_eq!(w.agents["a1"].cost(), None);
+    }
+
+    #[test]
+    fn session_cost_splits_main_and_subagents() {
+        let mut w = World::new("proj");
+        w.apply(&ev(10, spawn("a1", ROOT)), false);
+        w.apply(&ev(10, spawn("a2", ROOT)), false);
+        w.apply(&ev(11, million_in(ROOT, "claude-opus-5-5")), false); // $4
+        w.apply(&ev(12, million_in("a1", "claude-opus-5-5")), false); // $4
+        w.apply(&ev(13, million_in("a1", "claude-opus-5-5")), false); // $4
+        w.apply(&ev(14, million_in("a2", "local-model")), false);
+        let s = w.cost_summary();
+        assert!((s.main - 4.0).abs() < 1e-9);
+        assert!((s.subagents - 8.0).abs() < 1e-9);
+        assert_eq!(s.unpriced, 1);
+        let share = s.subagent_share().unwrap();
+        assert!((share - 2.0 / 3.0).abs() < 1e-9);
+        assert_eq!(World::new("p").cost_summary().subagent_share(), None);
+    }
+
+    #[test]
+    fn cost_aggregates_per_agent_type() {
+        let mut w = World::new("proj");
+        w.apply(&ev(10, spawn_typed("e1", "explorer")), false);
+        w.apply(&ev(10, spawn_typed("e2", "explorer")), false);
+        w.apply(&ev(10, spawn_typed("r1", "reviewer")), false);
+        w.apply(&ev(11, million_in("e1", "claude-sonnet-5-5")), false); // $2
+        w.apply(&ev(12, million_in("e2", "claude-sonnet-5-5")), false); // $2
+        w.apply(&ev(13, million_in("r1", "claude-opus-5-5")), false); // $4
+        w.apply(&ev(14, million_in("e2", "local-model")), false);
+        let rows = w.cost_by_type();
+        let got: Vec<_> = rows
+            .iter()
+            .map(|r| (r.agent_type.as_str(), r.agents, r.unpriced, r.usd))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("reviewer", 1, 0, 4.0),
+                ("explorer", 2, 1, 2.0),
+                ("main", 1, 0, 0.0),
+            ]
+        );
+        assert_eq!(rows[1].tokens, 3_000_000);
     }
 }
