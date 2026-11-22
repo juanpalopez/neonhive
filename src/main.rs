@@ -162,15 +162,15 @@ fn view(term: &mut DefaultTerminal, mut app: App) -> anyhow::Result<bool> {
             KeyCode::Char('q') => return Ok(false),
             KeyCode::Esc if app.help => app.help = false,
             KeyCode::Esc | KeyCode::Backspace => return Ok(true),
-            KeyCode::Char('?') | KeyCode::Char('h') => app.help = !app.help,
+            KeyCode::Char('?' | 'h') => app.help = !app.help,
             KeyCode::Up | KeyCode::Char('k') => app.select(-1),
             KeyCode::Down | KeyCode::Char('j') => app.select(1),
             KeyCode::PageUp => app.select(-10),
             KeyCode::PageDown => app.select(10),
             KeyCode::Char('f') => app.follow = !app.follow,
             KeyCode::Char(' ') => app.paused = !app.paused,
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                app.speed_idx = (app.speed_idx + 1).min(SPEEDS.len() - 1)
+            KeyCode::Char('+' | '=') => {
+                app.speed_idx = (app.speed_idx + 1).min(SPEEDS.len() - 1);
             }
             KeyCode::Char('-') => app.speed_idx = app.speed_idx.saturating_sub(1),
             KeyCode::Char('r') => app.restart(),

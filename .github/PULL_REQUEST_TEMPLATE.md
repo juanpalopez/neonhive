@@ -1,3 +1,5 @@
+<!-- Title must follow Conventional Commits, e.g. "feat(ui): add timeline bar". -->
+
 ## What this changes
 
 ## Why
