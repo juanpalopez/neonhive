@@ -56,7 +56,8 @@ How lines become events:
 
 - An `assistant` line holds content blocks. A `tool_use` block becomes a `Tool` event, a `SendMessage` tool call becomes a `Message`, a `text` block becomes `Text`. An `Agent` tool call is remembered: its id tells us later who spawned whom.
 - A new `agent-<id>.jsonl` file becomes a `Spawn`. The parent is whoever made the tool call named in the `.meta.json` file. This is how nested subagents get the right parent.
-- A background subagent finishes with a task notification attached to its parent's transcript; a foreground subagent finishes with a tool result. Both become `Finish`.
+- A background subagent finishes with a task notification in its parent's transcript, written as an attachment, as a queue operation, as a user turn that is the notification, or several of these at once; a foreground subagent finishes with a tool result. All become `Finish`. A notification only counts when it opens the text, so one quoted inside a file or command output does not.
+- Every `Tool` event carries a `key`: a stable 64-bit hash of the tool name and the full input JSON. The display `detail` is lossy (a basename, a truncated command), so health compares keys, never details.
 - Token usage is repeated on every line of a multi-line model response, so it is counted once per response id.
 - The token count shown for an agent is input + output + cache writes. Cache reads are tracked but left out of that number: a session re-reads the same cached context on every turn, so adding reads would count it once per turn. The inspector shows all four.
 
@@ -88,16 +89,25 @@ file; nothing else knows which vendor a model belongs to.
 
 Each agent carries a small `Tracker` that `apply` feeds with its tool calls,
 tool errors, text and messages. `World::health` combines it with the world clock
-into a flag: `Erroring` (3 failed calls in a row), `Looping` (the same tool and
-detail 4 times in a row) or `Stalled` (running but silent for 10 minutes, or 30
-after a tool call, which may be a long build). The main agent, which waits for
-the human, and any agent with a running subagent are never stalled. Errors
-arrive after the call they belong to, so a call followed by another call or by
-text with no error between counts as a success and ends a streak. Silence is
-measured with `World::now_ts`, never the wall clock, so replays flag the same
-agents at the same moments. `apply` logs a line when an agent is first flagged;
-stalls happen with no event at all, so the app also calls `sweep_health` after
-it moves the clock.
+into a flag: `Erroring` (3 failed calls in a row), `Looping` (the same call key
+4 times in a row, each repeat issued within 60 seconds of the previous one) or
+`Stalled` (running but silent for 10 minutes after text, or 30 after a tool
+call or message, which may be a long build). The repeat window separates loops
+from polling: on real transcripts, identical calls re-issued without waiting
+came 2 to 10 seconds apart, while polls that waited were at least 256 seconds
+apart. Silence counts from the last activity, tool errors included, and an
+error does not end the wait for a call: a sibling call may still be running.
+The main agent, which waits for the human, any agent with a running subagent,
+and an agent that finished once and was resumed (its second completion is often
+not written) are never stalled. Errors arrive after the call they belong to, so
+a call followed by another call or by text with no error between counts as a
+success and ends a streak; with parallel calls a sibling's success between two
+errors is not seen, so failures from one batch add up. Time is
+`World::now_ts` or event time, never the wall clock, so replays flag the same
+agents at the same moments. `apply` re-checks the agent an event belongs to and
+logs a line when it is first flagged; stalls happen with no event at all, so the
+app also calls `sweep_health` after it moves the clock. The flag is stored on
+the agent, so views read it instead of re-assessing every frame.
 
 `apply` also queues animation requests (`Fx`): a packet between two agents or a
 flash on one. When history is loaded in bulk these are suppressed.
