@@ -127,7 +127,9 @@ impl World {
     }
 
     pub fn total_tokens(&self) -> u64 {
-        self.agents.values().map(Agent::shown_tokens).sum()
+        self.agents
+            .values()
+            .fold(0u64, |n, a| n.saturating_add(a.shown_tokens()))
     }
 
     pub fn running(&self) -> usize {

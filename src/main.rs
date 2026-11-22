@@ -157,12 +157,19 @@ fn report(session: Option<&Path>, json: bool) -> anyhow::Result<()> {
     for ev in ClaudeSource::open(&path).poll() {
         world.apply(&ev, false);
     }
-    if json {
-        println!("{}", report::json(&world));
+    let mut text = if json {
+        report::json(&world)
     } else {
-        print!("{}", report::markdown(&world));
+        report::markdown(&world)
+    };
+    if !text.ends_with('\n') {
+        text.push('\n');
     }
-    Ok(())
+    // A reader that closes the pipe early (`| head`) is not an error.
+    match std::io::Write::write_all(&mut std::io::stdout().lock(), text.as_bytes()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(()),
+    }
 }
 
 fn demo() -> App {

@@ -120,8 +120,8 @@ struct Tailer {
     first_ts: Option<i64>,
     last_ts: i64,
     announced: bool,
-    msg_id: String,
-    msg_counted: Tokens,
+    /// Usage already emitted, per API message id.
+    counted: HashMap<String, Tokens>,
 }
 
 impl Tailer {
@@ -134,8 +134,7 @@ impl Tailer {
             first_ts: None,
             last_ts: 0,
             announced: false,
-            msg_id: String::new(),
-            msg_counted: Tokens::default(),
+            counted: HashMap::new(),
         }
     }
 
@@ -198,18 +197,22 @@ impl Tailer {
                 };
                 // One API message spans several lines, each repeating its
                 // usage (the output count can grow); emit only what is new.
-                if id != self.msg_id {
-                    self.msg_id = id.to_string();
-                    self.msg_counted = Tokens::default();
-                }
-                let new = total.minus(&self.msg_counted);
+                // A line without an id cannot be matched to earlier lines, so
+                // it counts in full.
+                let new = if id.is_empty() {
+                    total
+                } else {
+                    let counted = self.counted.entry(id.to_string()).or_default();
+                    let new = total.minus(counted);
+                    counted.add(&new);
+                    new
+                };
                 if !new.is_zero() {
                     push(Kind::Usage {
                         agent: agent.clone(),
                         tokens: new,
                         model: msg["model"].as_str().unwrap_or("").to_string(),
                     });
-                    self.msg_counted.add(&new);
                 }
                 for block in msg["content"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
                     match block["type"].as_str().unwrap_or("") {
@@ -609,6 +612,55 @@ mod tests {
         );
         let got = kinds(&ClaudeSource::open(&s.main()).poll());
         assert_eq!(got.iter().filter(|k| k.starts_with("usage")).count(), 1);
+    }
+
+    fn usage_total(events: &[Event]) -> u64 {
+        events
+            .iter()
+            .map(|e| match &e.kind {
+                Kind::Usage { tokens, .. } => tokens.fresh(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn interleaved_message_ids_are_not_counted_twice() {
+        let s = Scratch::new("usage-interleaved");
+        for id in ["m1", "m2", "m1"] {
+            s.append(
+                "s1.jsonl",
+                &assistant(1, id, r#"{"type":"text","text":"a"}"#),
+            );
+        }
+        assert_eq!(usage_total(&ClaudeSource::open(&s.main()).poll()), 70);
+    }
+
+    #[test]
+    fn messages_without_an_id_each_count() {
+        let s = Scratch::new("usage-no-id");
+        for _ in 0..2 {
+            s.append(
+                "s1.jsonl",
+                &assistant(1, "", r#"{"type":"text","text":"a"}"#),
+            );
+        }
+        assert_eq!(usage_total(&ClaudeSource::open(&s.main()).poll()), 70);
+    }
+
+    #[test]
+    fn absurd_token_counts_do_not_overflow() {
+        let s = Scratch::new("usage-overflow");
+        let line = format!(
+            r#"{{"type":"assistant","timestamp":"{T}01.000Z","message":{{"id":"x","usage":{{"input_tokens":18446744073709551615,"output_tokens":7}},"content":[]}}}}"#
+        ) + "\n";
+        s.append("s1.jsonl", &line);
+        s.append("s1.jsonl", &line.replace("\"x\"", "\"y\""));
+        let mut w = crate::state::World::new("p");
+        for e in ClaudeSource::open(&s.main()).poll() {
+            w.apply(&e, false);
+        }
+        assert_eq!(w.total_tokens(), u64::MAX);
     }
 
     #[test]
