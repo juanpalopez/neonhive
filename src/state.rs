@@ -1,6 +1,7 @@
 //! World state: a reducer over the normalized event stream.
 
 use crate::event::{Event, Kind, Tokens, ROOT};
+use crate::health::{self, Health, Tracker};
 use crate::pricing;
 use crate::util::clean;
 use std::collections::{HashMap, VecDeque};
@@ -39,6 +40,8 @@ pub struct Agent {
     pub last_text: String,
     pub last_tool: String,
     pub recent_tools: VecDeque<String>,
+    /// Loop, error-streak and stall counters. See [`crate::health`].
+    pub health: Tracker,
     /// Spawn order; keeps the layout stable.
     pub order: usize,
 }
@@ -63,6 +66,8 @@ pub enum LogKind {
     Msg,
     Text,
     Prompt,
+    /// An agent was first flagged as looping, erroring or stalled.
+    Health,
 }
 
 pub struct LogLine {
@@ -137,6 +142,67 @@ impl World {
             .count()
     }
 
+    /// Health flag of an agent at the current world time. See [`health::assess`].
+    pub fn health(&self, a: &Agent) -> Health {
+        health::assess(
+            &a.health,
+            a.status == Status::Running,
+            a.id == ROOT,
+            self.now_ts - a.last_ts,
+            || self.has_running_child(&a.id),
+        )
+    }
+
+    /// Why an agent is flagged, or `None` when it is healthy.
+    pub fn health_reason(&self, a: &Agent) -> Option<String> {
+        let h = self.health(a);
+        h.is_flagged()
+            .then(|| a.health.reason(h, self.now_ts - a.last_ts))
+    }
+
+    /// Number of agents with a health flag.
+    pub fn flagged(&self) -> usize {
+        self.agents
+            .values()
+            .filter(|a| self.health(a).is_flagged())
+            .count()
+    }
+
+    fn has_running_child(&self, id: &str) -> bool {
+        self.agents
+            .values()
+            .any(|c| c.status == Status::Running && c.parent.as_deref() == Some(id))
+    }
+
+    /// Re-check every agent against the current clock. Stalls are a matter of
+    /// time passing with no events, so `apply` alone cannot notice them; the
+    /// app calls this after it moves `now_ts`. Writes one log line per new flag.
+    pub fn sweep_health(&mut self) {
+        let ids: Vec<String> = self
+            .order
+            .iter()
+            .filter(|id| self.agents[*id].status == Status::Running)
+            .cloned()
+            .collect();
+        for id in ids {
+            self.note_health(&id, self.now_ts);
+        }
+    }
+
+    /// Update the reported health of one agent; log it if newly flagged.
+    fn note_health(&mut self, id: &str, ts: i64) {
+        let Some(a) = self.agents.get(id) else {
+            return;
+        };
+        let h = self.health(a);
+        let silent = self.now_ts - a.last_ts;
+        let a = self.agents.get_mut(id).unwrap();
+        if a.health.report(h) {
+            let reason = a.health.reason(h, silent);
+            self.say(ts, id, LogKind::Health, reason);
+        }
+    }
+
     fn ensure(&mut self, id: &str, ts: i64) -> &mut Agent {
         if !self.agents.contains_key(id) {
             self.order.push(id.to_string());
@@ -161,6 +227,7 @@ impl World {
                     last_text: String::new(),
                     last_tool: String::new(),
                     recent_tools: VecDeque::new(),
+                    health: Tracker::default(),
                     order: self.order.len() - 1,
                 },
             );
@@ -248,6 +315,7 @@ impl World {
                 a.status = if *ok { Status::Done } else { Status::Failed };
                 a.finished_ts = Some(ts);
                 a.reported_tokens = tokens.filter(|t| *t > 0);
+                a.health = Tracker::default();
                 let parent = a.parent.clone().unwrap_or_else(|| ROOT.to_string());
                 let (kind, pk, text) = if *ok {
                     (
@@ -268,7 +336,7 @@ impl World {
                 }
             }
             Kind::Message { from, to, summary } => {
-                self.touch(from, ts);
+                self.touch(from, ts).health.on_message();
                 self.total_msgs += 1;
                 let target = self.resolve(to);
                 let name = target
@@ -297,6 +365,7 @@ impl World {
                 let a = self.touch(agent, ts);
                 a.tools += 1;
                 a.last_tool = tool.clone();
+                a.health.on_call(tool, detail);
                 let line = if detail.is_empty() {
                     tool.clone()
                 } else {
@@ -316,6 +385,8 @@ impl World {
             Kind::ToolError { agent } => {
                 let a = self.ensure(agent, ts);
                 a.errors += 1;
+                let tool = a.last_tool.clone();
+                a.health.on_error(&tool);
                 let text = format!("tool error ({})", a.last_tool);
                 self.say(ts, agent, LogKind::Error, text);
             }
@@ -337,6 +408,7 @@ impl World {
             Kind::Text { agent, text } => {
                 let a = self.touch(agent, ts);
                 a.last_text = text.clone();
+                a.health.on_text();
                 a.last_tool.clear();
                 self.say(ts, agent, LogKind::Text, clean(text, 160));
             }
@@ -350,6 +422,17 @@ impl World {
                     a.prompt = text.clone();
                 }
             }
+        }
+        let actor = match &ev.kind {
+            Kind::Message { from: id, .. }
+            | Kind::Tool { agent: id, .. }
+            | Kind::ToolError { agent: id }
+            | Kind::Usage { agent: id, .. }
+            | Kind::Text { agent: id, .. } => Some(id),
+            _ => None,
+        };
+        if let Some(id) = actor {
+            self.note_health(id, ts);
         }
     }
 }

@@ -192,6 +192,7 @@ impl App {
                 self.world.now_ts = self.vt as i64;
             }
         }
+        self.world.sweep_health();
 
         for fx in std::mem::take(&mut self.world.fx) {
             match fx {

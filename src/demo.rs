@@ -42,9 +42,20 @@ const TEXTS: [&str; 5] = [
     "Reproduced the failure with a minimal case.",
 ];
 
+/// Files the main agent reads. It cycles through them so that it does not look
+/// like it is looping itself.
+const ROOT_READS: [&str; 3] = ["checkout.test.ts", "checkout.ts", "cart.ts"];
+/// The call a looping demo agent repeats.
+const LOOP_CALL: (&str, &str) = ("Bash", "npm test -- checkout.test.ts");
+/// Every this many spawns, one agent gets stuck repeating `LOOP_CALL`, so the
+/// health flags show up in `--demo`. Chosen by spawn count, not by `rand`, so
+/// the rest of the script is unchanged.
+const LOOP_EVERY: u32 = 5;
+
 struct Live {
     id: String,
     until: i64,
+    looper: bool,
 }
 
 pub struct DemoSource {
@@ -104,10 +115,13 @@ impl DemoSource {
                 }
                 _ => ROOT.to_string(),
             };
-            let until = ts + 6_000 + self.rand(20_000) as i64;
+            let looper = self.spawned % LOOP_EVERY == 2;
+            // A looper lives longer, so it has time to repeat itself on screen.
+            let until = ts + 6_000 + self.rand(20_000) as i64 + if looper { 15_000 } else { 0 };
             self.live.push(Live {
                 id: id.clone(),
                 until,
+                looper,
             });
             return Kind::Spawn {
                 id,
@@ -118,6 +132,7 @@ impl DemoSource {
         }
         let i = self.rand(self.live.len() as u32) as usize;
         let agent = self.live[i].id.clone();
+        let looper = self.live[i].looper;
         match self.rand(20) {
             0 => Kind::ToolError { agent },
             1 => Kind::Message {
@@ -150,10 +165,11 @@ impl DemoSource {
             8 => Kind::Tool {
                 agent: ROOT.into(),
                 tool: "Read".into(),
-                detail: "checkout.test.ts".into(),
+                detail: ROOT_READS[self.step as usize % ROOT_READS.len()].into(),
             },
             _ => {
-                let (tool, detail) = TOOLS[self.rand(TOOLS.len() as u32) as usize];
+                let pick = TOOLS[self.rand(TOOLS.len() as u32) as usize];
+                let (tool, detail) = if looper { LOOP_CALL } else { pick };
                 Kind::Tool {
                     agent,
                     tool: tool.into(),

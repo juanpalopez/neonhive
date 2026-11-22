@@ -84,6 +84,20 @@ per-model token split with `pricing::cost`, and `World::cost_summary` and
 `World::cost_by_type` add those up. `src/pricing.rs` holds the price table as
 data (model id families and their rates), merged with an optional `--prices`
 file; nothing else knows which vendor a model belongs to.
+### Health (`src/health.rs`)
+
+Each agent carries a small `Tracker` that `apply` feeds with its tool calls,
+tool errors, text and messages. `World::health` combines it with the world clock
+into a flag: `Erroring` (3 failed calls in a row), `Looping` (the same tool and
+detail 4 times in a row) or `Stalled` (running but silent for 10 minutes, or 30
+after a tool call, which may be a long build). The main agent, which waits for
+the human, and any agent with a running subagent are never stalled. Errors
+arrive after the call they belong to, so a call followed by another call or by
+text with no error between counts as a success and ends a streak. Silence is
+measured with `World::now_ts`, never the wall clock, so replays flag the same
+agents at the same moments. `apply` logs a line when an agent is first flagged;
+stalls happen with no event at all, so the app also calls `sweep_health` after
+it moves the clock.
 
 `apply` also queues animation requests (`Fx`): a packet between two agents or a
 flash on one. When history is loaded in bulk these are suppressed.

@@ -16,6 +16,9 @@ use std::collections::HashMap;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const GLITCH: [char; 12] = ['▓', '▒', '░', '#', '%', '/', '\\', '0', '1', '$', '≡', '¦'];
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// Marks an agent flagged by `crate::health`. Single-width on every terminal,
+/// unlike the warning sign emoji.
+const HEALTH_GLYPH: &str = "▲";
 
 fn fg(c: Rgb) -> Style {
     Style::default().fg(c.c())
@@ -132,6 +135,13 @@ fn draw_header(buf: &mut Buffer, area: Rect, app: &App) {
     spans.extend(stat("TOK", fmt_tokens(w.total_tokens())));
     spans.extend(stat("COST", session_cost(w)));
     spans.extend(stat("MSG", w.total_msgs.to_string()));
+    let flagged = w.flagged();
+    if flagged > 0 {
+        spans.push(Span::styled(
+            format!("  {HEALTH_GLYPH} {flagged} FLAGGED"),
+            bold(fx::ORANGE),
+        ));
+    }
     spans.push(Span::styled(
         format!("  {} ", fmt_clock(w.now_ts)),
         fg(fx::DIM),
@@ -432,6 +442,10 @@ fn draw_node(
             }
         }
     };
+    let health = world.health(a);
+    if health.is_flagged() {
+        border = fx::ORANGE.scale(pulse);
+    }
     border = border.mix(fx::WHITE, flash * 0.8);
     if selected {
         border = border.mix(fx::WHITE, 0.45);
@@ -502,6 +516,20 @@ fn draw_node(
         }
         Status::Done => (" ✔ done".to_string(), fx::GREEN.scale(0.6)),
         Status::Failed => (" ✖ fail".to_string(), fx::RED),
+    };
+    let (status, sc) = if health.is_flagged() {
+        // "loop x12" when it fits, else just "loop": never a cut-off count.
+        let short = a.health.short(health);
+        let full = format!(" {HEALTH_GLYPH} {short} ");
+        let word = short.split(' ').next().unwrap_or("");
+        let text = if full.chars().count() <= budget {
+            full
+        } else {
+            format!(" {HEALTH_GLYPH} {word} ")
+        };
+        (text, fx::ORANGE)
+    } else {
+        (status, sc)
     };
     let status: String = status.chars().take(budget).collect();
     put(&mut bot, &status, sc, false);
@@ -617,6 +645,13 @@ fn draw_inspector(buf: &mut Buffer, area: Rect, app: &App) {
         )),
         rule("TOOLS"),
     ]);
+    if let Some(reason) = w.health_reason(a) {
+        let line = Line::from(vec![
+            Span::styled(format!("{:<8}", "HEALTH"), fg(fx::DIM)),
+            Span::styled(format!("{HEALTH_GLYPH} {reason}"), bold(fx::ORANGE)),
+        ]);
+        lines.insert(3, line);
+    }
     for t in a.recent_tools.iter().rev() {
         lines.push(Line::from(vec![
             Span::styled("▸ ", fg(fx::CYAN)),
@@ -654,6 +689,11 @@ fn draw_roster(buf: &mut Buffer, area: Rect, app: &App) {
     for (row, id) in w.order.iter().enumerate().skip(start).take(rows) {
         let a = &w.agents[id];
         let (glyph, _, sc) = status_style(w, a);
+        let (glyph, sc) = if w.health(a).is_flagged() {
+            ('▲', fx::ORANGE)
+        } else {
+            (glyph, sc)
+        };
         let y = inner.y + (row - start) as u16;
         let selected = row == app.selected;
         let name = if a.label.is_empty() {
@@ -756,6 +796,7 @@ fn draw_log(buf: &mut Buffer, area: Rect, app: &App) {
             LogKind::Msg => ("✉", fx::YELLOW),
             LogKind::Text => ("»", fx::TEXT.scale(0.7)),
             LogKind::Prompt => ("❯", fx::WHITE),
+            LogKind::Health => (HEALTH_GLYPH, fx::ORANGE),
         };
         let age = (rows - (w.log.len() - skip - i)) as f32 / rows.max(1) as f32;
         let fade = 0.55 + 0.45 * age; // older lines recede

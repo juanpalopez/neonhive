@@ -10,6 +10,7 @@ All notable changes to this project are recorded here. The format follows
 
 - `neonhive report [SESSION] [--json]`: prints a Markdown or JSON summary of a session (header, token split, agent table, most used tools, failures) without opening the UI. Defaults to the most recent session. Reports contain labels and tool names, never prompts.
 - Cost estimates: per agent in the inspector, for the session in the header (`COST ~$…`), the subagents' share in the main agent's inspector, and a cost-by-agent-type view of the roster (`c`). Prices come from a built-in table of Claude list prices (taken 2026-11-22); `--prices FILE` replaces or extends it. Agents on a model with no known price show tokens only.
+- Stuck and loop detection. An agent is flagged when it repeats the same tool call 4 times in a row, has 3 failed tool calls in a row, or stays silent while running (10 minutes, or 30 after a tool call or message). A parent with running subagents and the main agent are never flagged as stalled. Flags show on the node, in the roster, in the inspector (`HEALTH`) and once in the event stream; the header counts flagged agents. The demo scripts a looping agent.
 
 ### Changed
 
