@@ -46,4 +46,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Same reasoning as the branch name: a fork's commits (for example
+          # "Update README.md" from the web editor) are squashed away on merge.
+          WARN_ONLY: ${{ github.event.pull_request.head.repo.fork && '1' || '0' }}
         run: scripts/check-commit-messages.sh "$BASE_SHA" "$HEAD_SHA"
