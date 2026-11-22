@@ -1,4 +1,8 @@
-<!-- Title must follow Conventional Commits, e.g. "feat(ui): add timeline bar". -->
+<!--
+Title and every commit subject must follow Conventional Commits, e.g. "feat(ui): add timeline bar".
+Branch name: <type>/<short-kebab-description>, e.g. "feat/timeline-bar".
+See CONTRIBUTING.md.
+-->
 
 ## What this changes
 
