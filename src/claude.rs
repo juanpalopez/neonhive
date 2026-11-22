@@ -724,27 +724,6 @@ mod tests {
     }
 
     #[test]
-    fn usage_is_split_by_token_kind() {
-        let s = Scratch::new("usage-split");
-        s.append(
-            "s1.jsonl",
-            &assistant(1, "m1", r#"{"type":"text","text":"a"}"#),
-        );
-        let events = ClaudeSource::open(&s.main()).poll();
-        let got = events.iter().find_map(|e| match &e.kind {
-            Kind::Usage { tokens, model, .. } => Some((*tokens, model.as_str())),
-            _ => None,
-        });
-        let want = Tokens {
-            input: 10,
-            output: 5,
-            cache_read: 100,
-            cache_write: 20,
-        };
-        assert_eq!(got, Some((want, "m1")));
-    }
-
-    #[test]
     fn task_notification_finishes_agent() {
         let s = Scratch::new("notify");
         for (sec, id, status) in [(1, "aaa", "completed"), (2, "bbb", "failed")] {

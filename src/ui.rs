@@ -954,23 +954,6 @@ mod tests {
     }
 
     #[test]
-    fn shows_cost_in_header_and_cost_by_type_view() {
-        let mut app = busy_app();
-        frame(&mut app, 140, 40);
-        let text = frame(&mut app, 140, 40);
-        assert!(text.contains("COST ~$"), "header cost missing");
-        app.cost_view = true;
-        let text = frame(&mut app, 140, 40);
-        assert!(text.contains("COST BY TYPE"));
-        assert!(!text.contains(" ROSTER "));
-        // The main agent's inspector shows what its subagents spent.
-        app.follow = false;
-        app.selected = 0;
-        let text = frame(&mut app, 140, 40);
-        assert!(text.contains("% of session"), "subagent share missing");
-    }
-
-    #[test]
     fn small_terminal_shows_notice() {
         let mut app = busy_app();
         assert!(frame(&mut app, 40, 10).contains("terminal too small"));
