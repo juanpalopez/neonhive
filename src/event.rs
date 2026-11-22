@@ -79,7 +79,12 @@ pub enum Kind {
     Tool {
         agent: String,
         tool: String,
+        /// Short display summary of the input. Lossy: never compare it.
         detail: String,
+        /// Identity of the call: equal for two calls with the same tool and
+        /// the same full input, and (barring hash collisions) different
+        /// otherwise. Used only to spot repeated calls.
+        key: u64,
     },
     ToolError {
         agent: String,

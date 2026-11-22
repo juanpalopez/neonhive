@@ -16,6 +16,9 @@ use std::collections::HashMap;
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const GLITCH: [char; 12] = ['▓', '▒', '░', '#', '%', '/', '\\', '0', '1', '$', '≡', '¦'];
 const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+/// Marks an agent flagged by `crate::health`. Single-width on every terminal,
+/// unlike the warning sign emoji.
+const HEALTH_GLYPH: &str = "▲";
 
 fn fg(c: Rgb) -> Style {
     Style::default().fg(c.c())
@@ -132,6 +135,13 @@ fn draw_header(buf: &mut Buffer, area: Rect, app: &App) {
     spans.extend(stat("TOK", fmt_tokens(w.total_tokens())));
     spans.extend(stat("COST", session_cost(w)));
     spans.extend(stat("MSG", w.total_msgs.to_string()));
+    let flagged = w.flagged();
+    if flagged > 0 {
+        spans.push(Span::styled(
+            format!("  {HEALTH_GLYPH} {flagged} FLAGGED"),
+            bold(fx::ORANGE),
+        ));
+    }
     spans.push(Span::styled(
         format!("  {} ", fmt_clock(w.now_ts)),
         fg(fx::DIM),
@@ -402,6 +412,23 @@ fn draw_graph(buf: &mut Buffer, area: Rect, app: &mut App) {
     }
 }
 
+/// The flag part of a node's bottom row, at most `budget` cells: "loop x12"
+/// when it fits, else the word alone ("loop"), else only the glyph. Never a
+/// cut-off word or count.
+fn flag_status(short: &str, budget: usize) -> String {
+    let word = short.split(' ').next().unwrap_or("");
+    [
+        format!(" {HEALTH_GLYPH} {short} "),
+        format!(" {HEALTH_GLYPH} {word} "),
+        format!(" {HEALTH_GLYPH} {word}"),
+        format!(" {HEALTH_GLYPH} "),
+        format!(" {HEALTH_GLYPH}"),
+    ]
+    .into_iter()
+    .find(|s| s.chars().count() <= budget)
+    .unwrap_or_default()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_node(
     buf: &mut Buffer,
@@ -432,6 +459,10 @@ fn draw_node(
             }
         }
     };
+    let health = world.health(a);
+    if health.is_flagged() {
+        border = fx::ORANGE.scale(pulse);
+    }
     border = border.mix(fx::WHITE, flash * 0.8);
     if selected {
         border = border.mix(fx::WHITE, 0.45);
@@ -502,6 +533,11 @@ fn draw_node(
         }
         Status::Done => (" ✔ done".to_string(), fx::GREEN.scale(0.6)),
         Status::Failed => (" ✖ fail".to_string(), fx::RED),
+    };
+    let (status, sc) = if health.is_flagged() {
+        (flag_status(&a.health.short(health), budget), fx::ORANGE)
+    } else {
+        (status, sc)
     };
     let status: String = status.chars().take(budget).collect();
     put(&mut bot, &status, sc, false);
@@ -617,6 +653,13 @@ fn draw_inspector(buf: &mut Buffer, area: Rect, app: &App) {
         )),
         rule("TOOLS"),
     ]);
+    if let Some(reason) = w.health_reason(a) {
+        let line = Line::from(vec![
+            Span::styled(format!("{:<8}", "HEALTH"), fg(fx::DIM)),
+            Span::styled(format!("{HEALTH_GLYPH} {reason}"), bold(fx::ORANGE)),
+        ]);
+        lines.insert(3, line);
+    }
     for t in a.recent_tools.iter().rev() {
         lines.push(Line::from(vec![
             Span::styled("▸ ", fg(fx::CYAN)),
@@ -654,6 +697,11 @@ fn draw_roster(buf: &mut Buffer, area: Rect, app: &App) {
     for (row, id) in w.order.iter().enumerate().skip(start).take(rows) {
         let a = &w.agents[id];
         let (glyph, _, sc) = status_style(w, a);
+        let (glyph, sc) = if w.health(a).is_flagged() {
+            ('▲', fx::ORANGE)
+        } else {
+            (glyph, sc)
+        };
         let y = inner.y + (row - start) as u16;
         let selected = row == app.selected;
         let name = if a.label.is_empty() {
@@ -760,6 +808,7 @@ fn draw_log(buf: &mut Buffer, area: Rect, app: &App) {
             LogKind::Msg => ("✉", fx::YELLOW),
             LogKind::Text => ("»", fx::TEXT.scale(0.7)),
             LogKind::Prompt => ("❯", fx::WHITE),
+            LogKind::Health => (HEALTH_GLYPH, fx::ORANGE),
         };
         let age = (rows - (w.log.len() - skip - i)) as f32 / rows.max(1) as f32;
         let fade = 0.55 + 0.45 * age; // older lines recede
@@ -881,6 +930,27 @@ mod tests {
         app.selected = 0;
         let text = frame(&mut app, 140, 40);
         assert!(text.contains("% of session"), "subagent share missing");
+    }
+
+    #[test]
+    fn flag_status_never_cuts_a_word() {
+        assert_eq!(flag_status("loop x12", 20), " ▲ loop x12 ");
+        assert_eq!(flag_status("loop x12", 9), " ▲ loop ");
+        assert_eq!(flag_status("stalled", 10), " ▲ stalled");
+        // A 16-cell box with a token count leaves about 7 cells.
+        assert_eq!(flag_status("stalled", 7), " ▲ ");
+        assert_eq!(flag_status("loop x5", 7), " ▲ loop");
+        assert_eq!(flag_status("err x3", 6), " ▲ err");
+        assert_eq!(flag_status("err x3", 1), "");
+        for budget in 0..20 {
+            for short in ["loop x12", "err x3", "stalled"] {
+                let s = flag_status(short, budget);
+                assert!(s.chars().count() <= budget);
+                let word = s.trim().trim_start_matches(HEALTH_GLYPH).trim();
+                assert!(word.is_empty() || short.starts_with(word), "{s:?}");
+                assert!(word.is_empty() || short.split(' ').any(|w| word.ends_with(w)));
+            }
+        }
     }
 
     #[test]

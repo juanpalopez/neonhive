@@ -48,6 +48,19 @@ pub fn str_hash(s: &str) -> u32 {
         .fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619))
 }
 
+/// 64-bit FNV-1a over `parts`, each followed by a NUL so that `["ab", "c"]`
+/// and `["a", "bc"]` differ. Stable across runs and platforms, unlike the std
+/// hasher, so a replay computes the same values every time.
+pub fn str_hash64(parts: &[&str]) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for p in parts {
+        for b in p.bytes().chain([0]) {
+            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    h
+}
+
 pub fn parse_ts(s: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(s)
         .ok()
@@ -127,6 +140,14 @@ mod tests {
         assert_eq!(fmt_usd(0.0), "~$0.00");
         assert_eq!(fmt_usd(123.45), "~$123.5");
         assert_eq!(fmt_usd(4_321.0), "~$4321");
+    }
+
+    #[test]
+    fn str_hash64_is_stable_and_separates_parts() {
+        // FNV-1a 64 of the empty input is its offset basis.
+        assert_eq!(str_hash64(&[]), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(str_hash64(&["a", "b"]), str_hash64(&["a", "b"]));
+        assert_ne!(str_hash64(&["ab", "c"]), str_hash64(&["a", "bc"]));
     }
 
     #[test]

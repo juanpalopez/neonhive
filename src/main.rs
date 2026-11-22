@@ -3,6 +3,7 @@ mod claude;
 mod demo;
 mod event;
 mod fx;
+mod health;
 mod picker;
 mod pricing;
 mod report;

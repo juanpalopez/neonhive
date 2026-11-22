@@ -34,6 +34,7 @@ neonhive --demo
 - **Replay.** Open any past session and watch it again at 1x to 128x. Dead time is skipped, so a three-hour session takes minutes.
 - **Inspector.** Select an agent to see its prompt, model, token count, tool calls, errors and last output.
 - **Cost estimates.** Estimated cost per agent, per agent type and for the whole session, and how much of it the subagents spent. See [Cost estimates](#cost-estimates).
+- **Stuck and loop detection.** Agents that repeat the exact same tool call in quick succession (polling with pauses between calls does not count), fail several calls in a row or go silent mid-task are flagged in orange on the graph, in the roster and in the inspector, which says why. Works in replay too.
 - **Event stream.** A running log of spawns, tool calls, messages and results, coloured by agent.
 - **Scales to big sessions.** Hundreds of subagents stay readable: active agents hold the screen, finished ones dissolve into an archive counter.
 - **Session reports.** `neonhive report` prints a Markdown or JSON summary of a session: tokens by kind, an agent table, most used tools and failures. Paste it into a pull request or feed it to a script.
