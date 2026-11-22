@@ -32,7 +32,7 @@ pub fn pick(
             let inner = block.inner(area);
             block.render(area, buf);
             if sessions.is_empty() {
-                let msg = "no Claude Code sessions found in ~/.claude/projects";
+                let msg = "no sessions found in ~/.claude/projects or ~/.codex/sessions";
                 buf.set_stringn(
                     inner.x + 1,
                     inner.y + 1,
@@ -65,6 +65,10 @@ pub fn pick(
                     ),
                     Span::styled(
                         format!("{}  ", fmt_date(s.mtime_ms)),
+                        Style::default().fg(fx::DIM.c()),
+                    ),
+                    Span::styled(
+                        format!("{:<7}", clean(s.tool, 6)),
                         Style::default().fg(fx::DIM.c()),
                     ),
                     Span::styled(

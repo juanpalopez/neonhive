@@ -1,5 +1,6 @@
 mod app;
 mod claude;
+mod codex;
 mod demo;
 mod event;
 mod fx;
@@ -25,13 +26,13 @@ use ratatui::{DefaultTerminal, Terminal};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Watch Claude Code agents and subagents interact, live or as a replay.
+/// Watch Claude Code and Codex agents and subagents interact, live or as a replay.
 #[derive(Parser)]
 #[command(version, about, args_conflicts_with_subcommands = true)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
-    /// Session transcript (.jsonl). Without it, a session list opens.
+    /// Session transcript (.jsonl, or a Codex .jsonl.zst). Without it, a session list opens.
     session: Option<PathBuf>,
     /// Open the most recent session.
     #[arg(long)]
@@ -45,7 +46,7 @@ struct Args {
     /// Replay speed multiplier: 1, 2, 4, 8, 16, 32, 64 or 128.
     #[arg(long, default_value_t = 8.0)]
     speed: f64,
-    /// Play an endless synthetic swarm. Needs no Claude Code sessions.
+    /// Play an endless synthetic swarm. Needs no sessions.
     #[arg(long, conflicts_with_all = ["session", "latest"])]
     demo: bool,
     /// Use the 256-color palette instead of 24-bit color.
@@ -121,6 +122,23 @@ fn main() -> anyhow::Result<()> {
     result
 }
 
+/// Sessions of every supported agent tool, most recent first.
+fn all_sessions() -> Vec<SessionInfo> {
+    let mut sessions = claude::sessions();
+    sessions.extend(codex::sessions());
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.mtime_ms));
+    sessions
+}
+
+/// The adapter for a session file, chosen by its name or first line.
+fn source(path: &Path) -> Box<dyn Source> {
+    if codex::is_rollout(path) {
+        Box::new(codex::CodexSource::open(path))
+    } else {
+        Box::new(ClaudeSource::open(path))
+    }
+}
+
 fn open(path: &Path, info: Option<&SessionInfo>, args: &Args) -> App {
     let recent = info.is_some_and(|s| util::now_ms() - s.mtime_ms < picker::LIVE_WINDOW_MS);
     let mode = if args.replay {
@@ -141,7 +159,7 @@ fn open(path: &Path, info: Option<&SessionInfo>, args: &Args) -> App {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default(),
     };
-    let mut app = App::new(Box::new(ClaudeSource::open(path)), mode, &project, &title);
+    let mut app = App::new(source(path), mode, &project, &title);
     app.speed_idx = SPEEDS
         .iter()
         .position(|s| *s >= args.speed)
@@ -151,7 +169,7 @@ fn open(path: &Path, info: Option<&SessionInfo>, args: &Args) -> App {
 
 /// Prints a session report to stdout. No UI, no animation.
 fn report(session: Option<&Path>, json: bool) -> anyhow::Result<()> {
-    let sessions = claude::sessions();
+    let sessions = all_sessions();
     let (path, info) = match session {
         Some(p) => {
             anyhow::ensure!(p.is_file(), "no such session file: {}", p.display());
@@ -162,7 +180,7 @@ fn report(session: Option<&Path>, json: bool) -> anyhow::Result<()> {
         None => {
             let first = sessions
                 .first()
-                .ok_or_else(|| anyhow::anyhow!("no Claude Code sessions found"))?;
+                .ok_or_else(|| anyhow::anyhow!("no Claude Code or Codex sessions found"))?;
             (first.path.clone(), Some(first))
         }
     };
@@ -175,7 +193,7 @@ fn report(session: Option<&Path>, json: bool) -> anyhow::Result<()> {
             .unwrap_or_default(),
     };
     let mut world = state::World::new(&title);
-    for ev in ClaudeSource::open(&path).poll() {
+    for ev in source(&path).poll() {
         world.apply(&ev, false);
     }
     let mut text = if json {
@@ -275,7 +293,7 @@ fn run(term: &mut DefaultTerminal, args: &Args) -> anyhow::Result<()> {
         view(term, demo())?;
         return Ok(());
     }
-    let sessions = claude::sessions();
+    let sessions = all_sessions();
     let find = |path: &Path| sessions.iter().find(|s| s.path == path);
 
     if let Some(path) = &args.session {
@@ -287,7 +305,7 @@ fn run(term: &mut DefaultTerminal, args: &Args) -> anyhow::Result<()> {
     if args.latest {
         let first = sessions
             .first()
-            .ok_or_else(|| anyhow::anyhow!("no Claude Code sessions found"))?;
+            .ok_or_else(|| anyhow::anyhow!("no Claude Code or Codex sessions found"))?;
         view(term, open(&first.path, Some(first), args))?;
         return Ok(());
     }

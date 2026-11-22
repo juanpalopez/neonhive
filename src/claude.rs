@@ -416,6 +416,8 @@ pub struct SessionInfo {
     pub title: String,
     pub mtime_ms: i64,
     pub agents: usize,
+    /// Agent tool that wrote the session, as shown in the session list.
+    pub tool: &'static str,
 }
 
 /// All Claude Code sessions on this machine, most recent first.
@@ -468,6 +470,7 @@ pub fn sessions() -> Vec<SessionInfo> {
                 project,
                 mtime_ms,
                 agents,
+                tool: "claude",
             }
         })
         .collect()
