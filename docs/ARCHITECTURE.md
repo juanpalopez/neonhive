@@ -5,6 +5,7 @@ neonhive is a pipeline. Each stage knows only about the stage before it.
 ```
 transcript files ──▶ Source ──▶ Event ──▶ World ──▶ App ──▶ ui
                      claude.rs  event.rs  state.rs  app.rs  ui.rs
+                     codex.rs
                      demo.rs
 ```
 
@@ -64,6 +65,83 @@ How lines become events:
 
 This format is not a published contract. The adapter treats every field as
 optional and skips lines it cannot parse.
+
+### Codex CLI (`src/codex.rs`)
+
+Codex writes one "rollout" file per thread:
+
+```
+$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl       CODEX_HOME defaults to ~/.codex
+$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<thread id>.jsonl.zst   the same file once idle for 7 days
+$CODEX_HOME/session_index.jsonl                                        {id, thread_name, updated_at}, last one wins
+```
+
+The format was learned from rollout files written by Codex CLI 0.163 to 0.171
+(2026) and by releases from August to October 2025, and from the open-source
+Codex repository (`codex-rs/protocol`, `codex-rs/rollout`). Two line formats
+exist, and the adapter handles both:
+
+- **Legacy** (2025): the first line is `{id, timestamp, instructions, git}`; every later line is a bare response item (`message`, `reasoning`, `function_call`, `function_call_output`) or a `{record_type: "state"}` marker. Lines have no timestamp of their own and there is no token usage, so every event takes the header's time and the session shows no tokens.
+- **Envelope**: every line is `{timestamp, type, payload}`. `session_meta` opens the file (thread id, cwd, source, parent thread), `turn_context` carries the model, `response_item` is model input and output, `event_msg` holds events. Within this format, `session_meta.history_mode` is `legacy` (events such as `user_message` and `agent_message`) or `paginated` (events are `item_completed` with a typed item). All local 2026 files are paginated; the legacy history mode is handled from the source code only.
+
+The adapter is picked per file in `main.rs`: a name `rollout-*.jsonl`, a `.jsonl.zst`
+name, or a first line that is `session_meta` or a legacy header selects Codex;
+anything else is Claude Code. Plain files are tailed like Claude transcripts
+(byte offset, carry buffer for a partial line). Compressed files are cold, so they
+are decoded once with `ruzstd`.
+
+How records become events:
+
+| Record | Event |
+| --- | --- |
+| `event_msg` `item_completed` `UserMessage`; `event_msg` `user_message`; legacy bare `message` with role `user` (skipping injected `<environment_context>` and `<user_instructions>`) | `Prompt` |
+| `response_item` `message` with role `assistant` | `Text` |
+| `function_call`, `custom_tool_call`, `local_shell_call`, `web_search_call` | `Tool`. `shell` shows the script of `sh -lc <script>`; a patch, through the shell or the `apply_patch` tool, shows the first file and how many more; anything else shows its first string argument. MCP calls are named `<namespace>.<name>`. |
+| Code-mode `exec` call (a `custom_tool_call` whose input is a script) | Held back. The commands, patches and MCP calls the script makes arrive as `item_completed` items between the call and its output, and those are shown. A script with no such item is shown as `exec` when its output arrives, at the time of the call. |
+| `item_completed` `CommandExecution`, `FileChange`, `McpToolCall`, `DynamicToolCall`, `WebSearch`, `ImageView`, `ImageGeneration`, `Extension` (`web.search`, `image_gen.generation`), `CollabAgentToolCall` | `Tool`. A command whose `parsed_cmd` is a read, a search or a listing is shown as `read`, `search` or `list_files`, otherwise `shell`. An item whose id is a call already shown (a direct MCP call) adds no second `Tool`. |
+| Item `status` `failed` or `declined`, a non-zero `exit_code`, MCP `isError` or `error`, `success: false`, an extension `failure`; a script output starting `Script failed`; a legacy shell output whose `metadata.exit_code` is not zero | `ToolError` |
+| `event_msg` `token_count` | `Usage`, see below |
+| A rollout file whose `session_meta` names a parent thread | `Spawn` |
+| `event_msg` `task_complete` / `turn_aborted` in a subagent's file | `Finish` (`ok` true / false). The top-level agent waits for the human and never finishes. |
+| `inter_agent_communication`, `response_item` `agent_message` | `Message`, when both agent paths are known; counted once if it is written in both agents' files |
+
+Reasoning (encrypted, with optional summaries), `world_state`, `compacted`,
+`token_usage_record`, `thread_settings_applied` and `additional_tools` lines are
+skipped, as is everything unknown.
+
+Every `Tool` carries a `key` hashed from the full input: the tool name and the
+arguments JSON for calls, the script text for `exec`, and for completed items the
+item with its id, timing, status and results removed. Two runs of the same
+command therefore match even though their ids and outcomes differ.
+
+**Tokens.** `token_count.info.total_token_usage` is cumulative for the thread, and
+the same total is often written twice (a rate-limit update repeats it). The adapter
+emits the increase since the previous total; when a total goes down it uses
+`last_token_usage` instead. Codex counts cached tokens inside `input_tokens` (its
+own display uses input minus cached as the uncached part; locally,
+`total_tokens` = input + output in 319 of 321 records), and reasoning tokens inside
+`output_tokens`. So `Tokens.input` = `input_tokens` - `cached_input_tokens`,
+`Tokens.cache_read` = `cached_input_tokens`, `Tokens.output` = `output_tokens`.
+Codex also records `cache_write_input_tokens`. It is zero in every local file, its
+relation to `input_tokens` is not documented, and OpenAI's cache lifetimes (30
+minutes, 12 hours) do not match the 5-minute / 1-hour split in `Tokens`, so cache
+writes are left at zero. Summed increases matched the final cumulative total of
+every local session exactly. `token_usage_record` lines repeat the same usage per
+response and are skipped so nothing is counted twice.
+
+**Subagents.** Codex has them. A subagent is a thread of its own with its own
+rollout file in the same date tree. Its `session_meta` names the parent in
+`parent_thread_id` or in `source.subagent.thread_spawn.parent_thread_id`, and
+carries `agent_role`, `agent_nickname` and `agent_path` (`/root/<name>`; the
+top-level agent is `/root`). Every 2 seconds the adapter reads the first line of
+rollout files dated on or after the session's day; a thread whose parent is the
+session or one of its subagents becomes a `Spawn` (id: the thread id, type: the
+role, label: the nickname or path). Its file is then tailed like the root. The
+session list hides subagent threads and counts them toward the session they
+descend from. None of the local sessions used subagents, so this path is built
+from the source code and tested with synthetic files only. Not handled yet:
+`CollabAgentToolCall` states (`agents_states`) as a second source of `Finish`,
+forks (`forked_from_id`), and review or compaction threads that name no parent.
 
 ### Demo (`src/demo.rs`)
 
@@ -138,7 +216,7 @@ replace individual characters.
 1. Add `src/<tool>.rs` with a type that implements `Source`.
 2. Map the tool's records to the eight events. Use the agent's own id for `id`, and `event::ROOT` for the top-level agent.
 3. Make `poll` incremental: return history on the first call and only new events afterwards.
-4. Add session discovery if the tool stores sessions in a known place, and wire a flag or auto-detection into `main.rs`.
+4. Add session discovery if the tool stores sessions in a known place (return `claude::SessionInfo` with your tool's label in `tool`), add it to `all_sessions` in `main.rs`, and teach `source()` there to recognise your files by name or first line.
 5. Add tests that build small synthetic transcripts in a temp directory. Do not commit real transcripts.
 
 Nothing in `state.rs`, `app.rs` or `ui.rs` should need to change.
