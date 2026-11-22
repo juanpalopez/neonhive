@@ -1,8 +1,8 @@
 <h1 align="center">neonhive</h1>
 
 <p align="center">
-  <b>Watch your AI agents think.</b><br>
-  A cyberpunk terminal UI that visualizes how Claude Code agents and subagents spawn, talk and finish, live or as a replay.
+  <b>See your AI agents and subagents at work.</b><br>
+  A cyberpunk terminal UI that visualizes agents and subagents: who spawned whom, what each one is doing, how they talk, and what it cost. Live or as a replay.
 </p>
 
 <p align="center">
@@ -17,8 +17,12 @@
 </p>
 
 When a coding agent fans out into ten subagents, the terminal shows you one spinner.
-neonhive shows you the swarm: every agent is a node, every spawn, message and result
-is a pulse travelling along an edge, and every tool call scrolls past in an event stream.
+neonhive shows you the swarm. Every agent and subagent is a node. Every spawn, message
+and result is a pulse travelling along an edge. Every tool call scrolls past in an
+event stream. Select any agent to see its task, its model, its tokens and its cost.
+
+It works with [Claude Code](https://claude.com/claude-code) today. The core knows
+nothing about any one agent tool, so others can be added with a single adapter.
 
 Try it in ten seconds, no agent sessions needed:
 
@@ -29,16 +33,24 @@ neonhive --demo
 
 ## Features
 
+### See the agents
+
 - **Live agent graph.** Main agent in the centre, subagents around it, nested subagents further out. Nodes glitch into existence, pulse while they work and dim when they finish.
 - **Message flow.** Coloured packets travel along edges: magenta for a spawn, green for a returned result, yellow for a message between agents, red for a failure.
+- **Inspector.** Select an agent to see its prompt, parent, model, tokens, cost, tool calls, errors and last output.
+- **Event stream.** A running log of spawns, tool calls, messages and results, coloured by agent.
 - **Replay.** Open any past session and watch it again at 1x to 128x. Dead time is skipped, so a three-hour session takes minutes.
-- **Inspector.** Select an agent to see its prompt, model, token count, tool calls, errors and last output.
+- **Scales to big sessions.** Hundreds of subagents stay readable: active agents hold the screen, finished ones dissolve into an archive counter.
+
+### Understand what they did
+
 - **Cost estimates.** Estimated cost per agent, per agent type and for the whole session, and how much of it the subagents spent. See [Cost estimates](#cost-estimates).
 - **Stuck and loop detection.** Agents that repeat the same tool call, fail several calls in a row or go silent mid-task are flagged in orange on the graph, in the roster and in the inspector, which says why. Works in replay too.
-- **Event stream.** A running log of spawns, tool calls, messages and results, coloured by agent.
-- **Scales to big sessions.** Hundreds of subagents stay readable: active agents hold the screen, finished ones dissolve into an archive counter.
 - **Session reports.** `neonhive report` prints a Markdown or JSON summary of a session: tokens by kind, an agent table, most used tools and failures. Paste it into a pull request or feed it to a script.
-- **Read-only and local.** neonhive only reads transcript files that Claude Code already writes to your disk. It sends nothing over the network and changes no files.
+
+### Safe to run
+
+- **Read-only and local.** neonhive only reads transcript files that the agent tool already writes to your disk. It sends nothing over the network and changes no files.
 - **Works anywhere.** 24-bit colour where the terminal supports it, a 256-colour palette where it does not.
 
 ## Install
@@ -222,9 +234,15 @@ Two things to know:
 
 ## Roadmap
 
+Planned work is tracked as issues on the [roadmap board](https://github.com/users/juanpalopez/projects/5).
+
 - Adapters for more agent tools, starting with Codex CLI
+- Timeline view: which agents ran in parallel and where the time went
+- Timeline scrubbing and jump-to-error in replays
+- Compare two sessions
+- Audit trail: commands run and files touched, per agent
+- `neonhive watch`: headless alerts when an agent fails, loops or passes a budget
 - Zoom and pan for very wide swarms
-- Timeline scrubbing in replays
 - Themes
 - Prebuilt binaries and Homebrew
 
