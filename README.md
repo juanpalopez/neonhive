@@ -21,8 +21,9 @@ neonhive shows you the swarm. Every agent and subagent is a node. Every spawn, m
 and result is a pulse travelling along an edge. Every tool call scrolls past in an
 event stream. Select any agent to see its task, its model, its tokens and its cost.
 
-It works with [Claude Code](https://claude.com/claude-code) today. The core knows
-nothing about any one agent tool, so others can be added with a single adapter.
+It works with [Claude Code](https://claude.com/claude-code) and the OpenAI
+[Codex CLI](https://github.com/openai/codex). The core knows nothing about any one
+agent tool, so others can be added with a single adapter.
 
 Try it in ten seconds, no agent sessions needed:
 
@@ -75,13 +76,17 @@ cargo install --path .
 ## Usage
 
 ```sh
-neonhive                    # pick a session from a list
+neonhive                    # pick a session from a list (Claude Code and Codex)
 neonhive --latest           # open the most recent session
 neonhive path/to/session.jsonl
+neonhive ~/.codex/sessions/2026/11/22/rollout-...jsonl   # a Codex session
 neonhive --demo             # endless synthetic swarm
 ```
 
-A session that Claude Code wrote to in the last two minutes opens **live** and follows
+The session list shows sessions from both tools, labelled `claude` or `codex`. A file
+given on the command line is recognised by its name or its first line.
+
+A session that was written to in the last two minutes opens **live** and follows
 new activity. An older session opens as a **replay** from its start. Force either with
 `--live` or `--replay`, and set the replay speed with `--speed 32`.
 
@@ -237,6 +242,9 @@ in each usage entry. An entry with no split is priced as 5-minute. An agent
 whose model has no known price shows tokens only and a dash for cost; a trailing `+`
 on a total means some agents could not be priced.
 
+There are no OpenAI prices in the built-in table yet, so Codex sessions show tokens
+and a dash for cost. Add your own with `--prices` (below) if you want an estimate.
+
 To use your own prices, pass a JSON file of model-id prefixes and USD per million
 tokens. Entries replace or extend the built-in table. A key matches every model id
 that starts with it, also behind a provider prefix such as `us.anthropic.`, and the
@@ -276,6 +284,11 @@ subagent gets its own transcript beside the main one. neonhive tails those files
 turns each line into a small normalized event (spawn, tool call, message, finish),
 and feeds the events to a renderer that knows nothing about Claude Code.
 
+Codex CLI writes one "rollout" file per thread under
+`~/.codex/sessions/YYYY/MM/DD/` (or `$CODEX_HOME/sessions`), and compresses files idle
+for a week to `.jsonl.zst`. A Codex subagent is a thread with its own rollout file
+that names its parent. neonhive reads plain and compressed rollouts the same way.
+
 ```
 transcript files ──▶ source adapter ──▶ events ──▶ world state ──▶ layout + animation ──▶ terminal
 ```
@@ -285,7 +298,7 @@ not touching the UI. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 Two things to know:
 
-- The transcript format is internal to Claude Code and can change between versions. The parser skips what it does not understand; if a new version breaks something, please [open an issue](https://github.com/juanpalopez/neonhive/issues).
+- The transcript formats are internal to Claude Code and Codex and can change between versions. The parser skips what it does not understand; if a new version breaks something, please [open an issue](https://github.com/juanpalopez/neonhive/issues).
 - Claude Code deletes old transcripts after a retention period (the `cleanupPeriodDays` setting). A session that is gone from disk cannot be replayed.
 
 ## Supported agent tools
@@ -293,14 +306,14 @@ Two things to know:
 | Tool | Status |
 | --- | --- |
 | Claude Code | Supported |
-| OpenAI Codex CLI | Planned |
+| OpenAI Codex CLI | Supported: sessions, prompts, tool calls, errors and tokens. Subagent threads are read as Codex's source code describes them, but have not been tested on a real multi-agent session yet. No cost estimate yet. Rollouts written in 2025 have no timestamps or token counts, so they replay as one instant with no tokens. |
 | Others (Gemini CLI, OpenCode, LangGraph, OpenTelemetry traces) | Open to contributions |
 
 ## Roadmap
 
 Planned work is tracked as issues on the [roadmap board](https://github.com/users/juanpalopez/projects/5).
 
-- Adapters for more agent tools, starting with Codex CLI
+- Adapters for more agent tools (Codex CLI is done; Gemini CLI and OpenCode are open)
 - Timeline view: which agents ran in parallel and where the time went
 - Timeline scrubbing and jump-to-error in replays
 - Compare two sessions
@@ -312,8 +325,8 @@ Planned work is tracked as issues on the [roadmap board](https://github.com/user
 
 ## FAQ
 
-**How do I see what my Claude Code subagents are doing?**
-Run `neonhive --latest` while Claude Code works. Each subagent appears as a node the moment it starts, with its current tool call and token count.
+**How do I see what my Claude Code or Codex subagents are doing?**
+Run `neonhive --latest` while the agent works. Each subagent appears as a node the moment it starts, with its current tool call and token count.
 
 **Does it slow down or interfere with my agent?**
 No. It reads files that are already being written and never writes to them.
@@ -325,7 +338,7 @@ No. There is no network code in neonhive.
 Any terminal with Unicode and at least 256 colours, 60x16 cells or larger. It looks best at 140x40 or more with 24-bit colour: iTerm2, Ghostty, Kitty, WezTerm, Alacritty, Windows Terminal. If colours look wrong, try `--ansi256`.
 
 **Can I use it with agents other than Claude Code?**
-Not yet. The core is tool-agnostic, and an adapter is about 300 lines. Contributions are welcome.
+Yes, with the OpenAI Codex CLI: its sessions appear in the same list. For other tools, the core is tool-agnostic and an adapter is a few hundred lines; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Contributions are welcome.
 
 ## Contributing
 
@@ -335,4 +348,4 @@ Bug reports, adapters and ideas are welcome. Start with [CONTRIBUTING.md](CONTRI
 
 [MIT](LICENSE)
 
-neonhive is an independent project. It is not affiliated with or endorsed by Anthropic.
+neonhive is an independent project. It is not affiliated with or endorsed by Anthropic or OpenAI.

@@ -144,6 +144,7 @@ and after your change. For visual changes, please include a before and after.
 | --- | --- |
 | `src/event.rs` | Normalized events and the `Source` trait |
 | `src/claude.rs` | Claude Code adapter: transcript parsing, tailing, session discovery |
+| `src/codex.rs` | Codex CLI adapter: rollout parsing (plain and `.zst`), tailing, subagent threads, session discovery |
 | `src/demo.rs` | Synthetic adapter |
 | `src/state.rs` | World state, built by applying events |
 | `src/pricing.rs` | Price table and cost estimates |
