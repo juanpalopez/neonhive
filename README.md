@@ -165,8 +165,9 @@ whose model has no known price shows tokens only and a dash for cost; a trailing
 on a total means some agents could not be priced.
 
 To use your own prices, pass a JSON file of model-id prefixes and USD per million
-tokens. Entries replace or extend the built-in table, and the longest matching
-prefix wins:
+tokens. Entries replace or extend the built-in table. A key matches every model id
+that starts with it, also behind a provider prefix such as `us.anthropic.`, and the
+longest matching key wins, whether it is yours or built in:
 
 ```sh
 neonhive --latest --prices prices.json

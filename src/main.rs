@@ -61,7 +61,7 @@ struct Args {
     size: String,
     /// JSON file of token prices (USD per million) that replace or extend the
     /// built-in table used for cost estimates.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", global = true)]
     prices: Option<PathBuf>,
 }
 
@@ -79,11 +79,11 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    if let Some(Command::Report { session, json }) = &args.command {
-        return report(session.as_deref(), *json);
-    }
     if let Some(file) = &args.prices {
         pricing::load(file)?;
+    }
+    if let Some(Command::Report { session, json }) = &args.command {
+        return report(session.as_deref(), *json);
     }
     let colorterm = std::env::var("COLORTERM").unwrap_or_default();
     fx::set_truecolor(

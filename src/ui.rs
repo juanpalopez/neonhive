@@ -691,6 +691,10 @@ fn session_cost(w: &World) -> String {
 fn subagent_share(w: &World) -> String {
     let s = w.cost_summary();
     match s.subagent_share() {
+        // Same marker as the header: some agents could not be priced.
+        Some(p) if s.unpriced > 0 => {
+            format!("{}+  {:.0}% of priced", fmt_usd(s.subagents), p * 100.0)
+        }
         Some(p) => format!("{}  {:.0}% of session", fmt_usd(s.subagents), p * 100.0),
         None => "—".to_string(),
     }
