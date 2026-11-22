@@ -108,6 +108,20 @@ git push origin --delete old-name
 Then open the pull request again from the renamed branch. To check a name locally:
 `scripts/check-branch-name.sh "$(git branch --show-current)"`.
 
+## Changelog
+
+`CHANGELOG.md` is written by hand ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)),
+and each release's notes on GitHub are copied from it. If your pull request title
+has type `feat`, `fix` or `perf`, or has a `!` (breaking), add one line under
+`## [Unreleased]`, in the matching `### Added`, `### Changed`, `### Fixed` or
+`### Removed` group, written for a user rather than a reviewer. Other types
+(`docs`, `ci`, `chore`, ...) do not need an entry. CI checks this (the `changelog`
+check). If a `feat`/`fix`/`perf` change has no visible effect, ask a maintainer to
+add the `skip-changelog` label. To check locally:
+`scripts/check-changelog.sh "feat: your title" origin/main HEAD`.
+
+Maintainers: see [docs/RELEASING.md](docs/RELEASING.md) for how a release is cut.
+
 ## Looking at your change
 
 You cannot attach a terminal to a pull request, but you can attach a frame:
