@@ -1,10 +1,10 @@
 //! World state: a reducer over the normalized event stream.
 
 use crate::event::{Event, Kind, Tokens, ROOT};
-use crate::health::{self, Health, Tracker};
+use crate::health::{self, Facts, Health, Tracker};
 use crate::pricing;
 use crate::util::clean;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 /// A running agent with no activity for this long is shown as idle.
 const IDLE_MS: i64 = 300_000;
@@ -42,6 +42,8 @@ pub struct Agent {
     pub recent_tools: VecDeque<String>,
     /// Loop, error-streak and stall counters. See [`crate::health`].
     pub health: Tracker,
+    /// Finished at least once and then acted again.
+    pub resumed: bool,
     /// Spawn order; keeps the layout stable.
     pub order: usize,
 }
@@ -132,7 +134,9 @@ impl World {
     }
 
     pub fn total_tokens(&self) -> u64 {
-        self.agents.values().map(Agent::shown_tokens).sum()
+        self.agents
+            .values()
+            .fold(0u64, |n, a| n.saturating_add(a.shown_tokens()))
     }
 
     pub fn running(&self) -> usize {
@@ -142,15 +146,10 @@ impl World {
             .count()
     }
 
-    /// Health flag of an agent at the current world time. See [`health::assess`].
+    /// Health flag of an agent as of the last check: the last event for it or
+    /// the last [`World::sweep_health`]. See [`health::assess`].
     pub fn health(&self, a: &Agent) -> Health {
-        health::assess(
-            &a.health,
-            a.status == Status::Running,
-            a.id == ROOT,
-            self.now_ts - a.last_ts,
-            || self.has_running_child(&a.id),
-        )
+        a.health.flag()
     }
 
     /// Why an agent is flagged, or `None` when it is healthy.
@@ -164,43 +163,79 @@ impl World {
     pub fn flagged(&self) -> usize {
         self.agents
             .values()
-            .filter(|a| self.health(a).is_flagged())
+            .filter(|a| a.health.flag().is_flagged())
             .count()
+    }
+
+    fn facts(&self, a: &Agent, has_running_child: bool) -> Facts {
+        Facts {
+            running: a.status == Status::Running,
+            is_root: a.id == ROOT,
+            resumed: a.resumed,
+            silent_ms: self.now_ts - a.last_ts,
+            has_running_child,
+        }
+    }
+
+    /// Re-check every running agent against the current clock. Stalls are a
+    /// matter of time passing with no events, so `apply` alone cannot notice
+    /// them; the app calls this after it moves `now_ts`. Writes one log line
+    /// per new flag. Runs every frame, so it looks up parents with a running
+    /// child once, and allocates nothing else unless a flag changes.
+    pub fn sweep_health(&mut self) {
+        let busy: HashSet<&str> = self
+            .agents
+            .values()
+            .filter(|a| a.status == Status::Running)
+            .filter_map(|a| a.parent.as_deref())
+            .collect();
+        let changed: Vec<(String, Health)> = self
+            .order
+            .iter()
+            .filter_map(|id| {
+                let a = self.agents.get(id)?;
+                if a.status != Status::Running {
+                    return None;
+                }
+                let h = health::assess(&a.health, &self.facts(a, busy.contains(id.as_str())));
+                (h != a.health.flag()).then(|| (id.clone(), h))
+            })
+            .collect();
+        for (id, h) in changed {
+            self.record_health(&id, h, self.now_ts);
+        }
+    }
+
+    /// Re-check one agent after an event of its own.
+    fn note_health(&mut self, id: &str, ts: i64) {
+        let Some(a) = self.agents.get(id) else {
+            return;
+        };
+        // An agent that just acted is rarely silent, so the scan for children
+        // is almost never needed.
+        let silent = self.now_ts - a.last_ts;
+        let child = silent > health::STALL_MS.min(health::STALL_AFTER_CALL_MS)
+            && self.has_running_child(id);
+        let h = health::assess(&a.health, &self.facts(a, child));
+        self.record_health(id, h, ts);
+    }
+
+    /// Store the flag now in force; log it if newly flagged.
+    fn record_health(&mut self, id: &str, h: Health, ts: i64) {
+        let now = self.now_ts;
+        let Some(a) = self.agents.get_mut(id) else {
+            return;
+        };
+        if a.health.report(h) {
+            let reason = a.health.reason(h, now - a.last_ts);
+            self.say(ts, id, LogKind::Health, reason);
+        }
     }
 
     fn has_running_child(&self, id: &str) -> bool {
         self.agents
             .values()
             .any(|c| c.status == Status::Running && c.parent.as_deref() == Some(id))
-    }
-
-    /// Re-check every agent against the current clock. Stalls are a matter of
-    /// time passing with no events, so `apply` alone cannot notice them; the
-    /// app calls this after it moves `now_ts`. Writes one log line per new flag.
-    pub fn sweep_health(&mut self) {
-        let ids: Vec<String> = self
-            .order
-            .iter()
-            .filter(|id| self.agents[*id].status == Status::Running)
-            .cloned()
-            .collect();
-        for id in ids {
-            self.note_health(&id, self.now_ts);
-        }
-    }
-
-    /// Update the reported health of one agent; log it if newly flagged.
-    fn note_health(&mut self, id: &str, ts: i64) {
-        let Some(a) = self.agents.get(id) else {
-            return;
-        };
-        let h = self.health(a);
-        let silent = self.now_ts - a.last_ts;
-        let a = self.agents.get_mut(id).unwrap();
-        if a.health.report(h) {
-            let reason = a.health.reason(h, silent);
-            self.say(ts, id, LogKind::Health, reason);
-        }
     }
 
     fn ensure(&mut self, id: &str, ts: i64) -> &mut Agent {
@@ -228,6 +263,7 @@ impl World {
                     last_tool: String::new(),
                     recent_tools: VecDeque::new(),
                     health: Tracker::default(),
+                    resumed: false,
                     order: self.order.len() - 1,
                 },
             );
@@ -245,6 +281,7 @@ impl World {
         if a.status != Status::Running {
             a.status = Status::Running;
             a.finished_ts = None;
+            a.resumed = true;
         }
         a
     }
@@ -361,11 +398,12 @@ impl World {
                 agent,
                 tool,
                 detail,
+                key,
             } => {
                 let a = self.touch(agent, ts);
                 a.tools += 1;
                 a.last_tool = tool.clone();
-                a.health.on_call(tool, detail);
+                a.health.on_call(tool, *key, ts);
                 let line = if detail.is_empty() {
                     tool.clone()
                 } else {
@@ -384,6 +422,10 @@ impl World {
             }
             Kind::ToolError { agent } => {
                 let a = self.ensure(agent, ts);
+                // A result coming back is activity: silence is measured from
+                // here, not from the call. Not `touch`: a late error does not
+                // resume a finished agent.
+                a.last_ts = a.last_ts.max(ts);
                 a.errors += 1;
                 let tool = a.last_tool.clone();
                 a.health.on_error(&tool);
@@ -553,6 +595,7 @@ mod tests {
             agent: agent.into(),
             tool: "Bash".into(),
             detail: "ls".into(),
+            key: 1,
         }
     }
 

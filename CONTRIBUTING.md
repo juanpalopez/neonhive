@@ -60,7 +60,67 @@ fix(claude): count usage once per response
 feat!: rename --latest to --last
 ```
 
-Commits inside the pull request can be titled however you like.
+## Commit messages
+
+Every commit in your pull request uses the same format as the title, and CI checks
+the subject line of each one (the `commit messages` check):
+
+```
+feat(ui): add timeline bar to replay
+fix(claude): count usage once per response
+```
+
+Merge commits, `Revert "..."`, and `fixup!` / `squash!` / `amend!` commits are
+allowed. The body of a commit is free-form. To check before you push:
+
+```sh
+scripts/check-commit-messages.sh origin/main HEAD
+```
+
+To fix a subject, run `git rebase -i origin/main`, mark the commit as `reword`, then
+`git push --force-with-lease`. For the latest commit, `git commit --amend` is enough.
+
+## Branch names
+
+Name your branch `<type>/<short-kebab-description>`, with the same types as the
+titles above. The description uses lower-case letters, digits and single hyphens:
+
+```
+feat/cost-accounting
+fix/usage-double-count
+ci/branch-and-commit-checks
+```
+
+CI checks this (the `branch name` check). Bot branches (`dependabot/`, `renovate/`)
+and `release/` branches are exempt.
+
+Pull requests from a fork only get a warning for branch names and commit messages:
+a branch called `main` or a commit called `Update README.md` is common there, and
+neither reaches history after a squash merge. The pull request title is always
+checked, because it becomes the commit on `main`. To rename a branch:
+
+```sh
+git branch -m feat/new-name
+git push origin -u feat/new-name
+git push origin --delete old-name
+```
+
+Then open the pull request again from the renamed branch. To check a name locally:
+`scripts/check-branch-name.sh "$(git branch --show-current)"`.
+
+## Changelog
+
+`CHANGELOG.md` is written by hand ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)),
+and each release's notes on GitHub are copied from it. If your pull request title
+has type `feat`, `fix` or `perf`, or has a `!` (breaking), add one line under
+`## [Unreleased]`, in the matching `### Added`, `### Changed`, `### Fixed` or
+`### Removed` group, written for a user rather than a reviewer. Other types
+(`docs`, `ci`, `chore`, ...) do not need an entry. CI checks this (the `changelog`
+check). If a `feat`/`fix`/`perf` change has no visible effect, ask a maintainer to
+add the `skip-changelog` label. To check locally:
+`scripts/check-changelog.sh "feat: your title" origin/main HEAD`.
+
+Maintainers: see [docs/RELEASING.md](docs/RELEASING.md) for how a release is cut.
 
 ## Looking at your change
 
@@ -106,6 +166,8 @@ and after your change. For visual changes, please include a before and after.
 Open an issue with your OS, terminal, neonhive version (`neonhive --version`), the
 Claude Code version if the bug is about a session, and a `--snapshot` frame if it is
 visual. Remove anything private from snapshots before posting.
+
+AI coding agents: [AGENTS.md](AGENTS.md) holds the rules for them (Claude Code reads it through `CLAUDE.md`).
 
 ## Conduct
 

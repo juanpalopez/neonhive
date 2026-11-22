@@ -37,20 +37,15 @@ neonhive --demo
 
 - **Live agent graph.** Main agent in the centre, subagents around it, nested subagents further out. Nodes glitch into existence, pulse while they work and dim when they finish.
 - **Message flow.** Coloured packets travel along edges: magenta for a spawn, green for a returned result, yellow for a message between agents, red for a failure.
-- **Inspector.** Select an agent to see its prompt, parent, model, tokens, cost, tool calls, errors and last output.
+- **Replay.** Open any past session and watch it again at 1x to 128x. Dead time is skipped, so a three-hour session takes minutes.
+- **Inspector.** Select an agent to see its prompt, model, token count, tool calls, errors and last output.
+- **Cost estimates.** Estimated cost per agent, per agent type and for the whole session, and how much of it the subagents spent. See [Cost estimates](#cost-estimates).
+- **Stuck and loop detection.** Agents that repeat the exact same tool call in quick succession (polling with pauses between calls does not count), fail several calls in a row or go silent mid-task are flagged in orange on the graph, in the roster and in the inspector, which says why. Works in replay too.
 - **Event stream.** A running log of spawns, tool calls, messages and results, coloured by agent.
 - **Replay.** Open any past session and watch it again at 1x to 128x. Dead time is skipped, so a three-hour session takes minutes.
 - **Scales to big sessions.** Hundreds of subagents stay readable: active agents hold the screen, finished ones dissolve into an archive counter.
-
-### Understand what they did
-
-- **Cost estimates.** Estimated cost per agent, per agent type and for the whole session, and how much of it the subagents spent. See [Cost estimates](#cost-estimates).
-- **Stuck and loop detection.** Agents that repeat the same tool call, fail several calls in a row or go silent mid-task are flagged in orange on the graph, in the roster and in the inspector, which says why. Works in replay too.
 - **Session reports.** `neonhive report` prints a Markdown or JSON summary of a session: tokens by kind, an agent table, most used tools and failures. Paste it into a pull request or feed it to a script.
-
-### Safe to run
-
-- **Read-only and local.** neonhive only reads transcript files that the agent tool already writes to your disk. It sends nothing over the network and changes no files.
+- **Read-only and local.** neonhive only reads transcript files that Claude Code already writes to your disk. It sends nothing over the network and changes no files.
 - **Works anywhere.** 24-bit colour where the terminal supports it, a 256-colour palette where it does not.
 
 ## Install
@@ -178,8 +173,9 @@ whose model has no known price shows tokens only and a dash for cost; a trailing
 on a total means some agents could not be priced.
 
 To use your own prices, pass a JSON file of model-id prefixes and USD per million
-tokens. Entries replace or extend the built-in table, and the longest matching
-prefix wins:
+tokens. Entries replace or extend the built-in table. A key matches every model id
+that starts with it, also behind a provider prefix such as `us.anthropic.`, and the
+longest matching key wins, whether it is yours or built in:
 
 ```sh
 neonhive --latest --prices prices.json

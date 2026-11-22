@@ -6,7 +6,7 @@
 //! is tolerant: unknown lines and fields are skipped.
 
 use crate::event::{Event, Kind, Source, Tokens, ROOT};
-use crate::util::{clean, parse_ts};
+use crate::util::{clean, parse_ts, str_hash64};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -120,8 +120,8 @@ struct Tailer {
     first_ts: Option<i64>,
     last_ts: i64,
     announced: bool,
-    msg_id: String,
-    msg_counted: Tokens,
+    /// Usage already emitted, per API message id.
+    counted: HashMap<String, Tokens>,
 }
 
 impl Tailer {
@@ -134,8 +134,7 @@ impl Tailer {
             first_ts: None,
             last_ts: 0,
             announced: false,
-            msg_id: String::new(),
-            msg_counted: Tokens::default(),
+            counted: HashMap::new(),
         }
     }
 
@@ -198,18 +197,22 @@ impl Tailer {
                 };
                 // One API message spans several lines, each repeating its
                 // usage (the output count can grow); emit only what is new.
-                if id != self.msg_id {
-                    self.msg_id = id.to_string();
-                    self.msg_counted = Tokens::default();
-                }
-                let new = total.minus(&self.msg_counted);
+                // A line without an id cannot be matched to earlier lines, so
+                // it counts in full.
+                let new = if id.is_empty() {
+                    total
+                } else {
+                    let counted = self.counted.entry(id.to_string()).or_default();
+                    let new = total.minus(counted);
+                    counted.add(&new);
+                    new
+                };
                 if !new.is_zero() {
                     push(Kind::Usage {
                         agent: agent.clone(),
                         tokens: new,
                         model: msg["model"].as_str().unwrap_or("").to_string(),
                     });
-                    self.msg_counted.add(&new);
                 }
                 for block in msg["content"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
                     match block["type"].as_str().unwrap_or("") {
@@ -251,6 +254,7 @@ impl Tailer {
                                     agent: agent.clone(),
                                     tool: name.to_string(),
                                     detail: tool_detail(name, input),
+                                    key: call_key(name, input),
                                 }),
                             }
                         }
@@ -268,8 +272,14 @@ impl Tailer {
                         text: clean(t, 400),
                     })
                 };
-                if let Some(kind) = content.as_str().and_then(prompt) {
-                    push(kind);
+                if let Some(text) = content.as_str() {
+                    // A background subagent's completion can also arrive as
+                    // the user turn itself.
+                    if let Some(kind) = notification(text, None) {
+                        push(kind);
+                    } else if let Some(kind) = prompt(text) {
+                        push(kind);
+                    }
                 }
                 for block in content.as_array().map(Vec::as_slice).unwrap_or(&[]) {
                     match block["type"].as_str().unwrap_or("") {
@@ -304,20 +314,51 @@ impl Tailer {
                     Some(s) => s.to_string(),
                     None => a["prompt"].to_string(),
                 };
-                if let Some(id) = tag(&text, "task-id") {
-                    let status = tag(&text, "status").unwrap_or("");
-                    if status != "running" && !status.is_empty() {
-                        push(Kind::Finish {
-                            id: id.to_string(),
-                            ok: status == "completed",
-                            tokens: a["usage"]["totalTokens"].as_u64(),
-                        });
-                    }
+                // The prompt is normally the notification text itself; when it
+                // is structured, the notification starts somewhere inside.
+                let text = text.find("<task-notification>").map_or("", |i| &text[i..]);
+                if let Some(kind) = notification(text, a["usage"]["totalTokens"].as_u64()) {
+                    push(kind);
+                }
+            }
+            "queue-operation" => {
+                // The same notification, queued for the parent's next turn.
+                // In long sessions this can be the only form that is written.
+                if let Some(kind) = v["content"].as_str().and_then(|t| notification(t, None)) {
+                    push(kind);
                 }
             }
             _ => {}
         }
     }
+}
+
+/// `Finish` from a task notification: a `<task-notification>` block with a
+/// `<task-id>` and a final `<status>`. The block must open the text (after
+/// whitespace), so a notification quoted inside a file or command output is
+/// not taken for a real one. Notifications without a status are progress
+/// events, and `running` is not final; neither finishes anything. The same
+/// notification is often written in several forms; `World` ignores a repeated
+/// `Finish`.
+fn notification(text: &str, tokens: Option<u64>) -> Option<Kind> {
+    if !text.trim_start().starts_with("<task-notification>") {
+        return None;
+    }
+    let id = tag(text, "task-id")?;
+    let status = tag(text, "status").unwrap_or("");
+    (!status.is_empty() && status != "running").then(|| Kind::Finish {
+        id: id.to_string(),
+        ok: status == "completed",
+        tokens,
+    })
+}
+
+/// Identity of a tool call for repeat detection: the tool name and its whole
+/// input. `Value`'s text form is canonical here, because serde_json keeps
+/// object keys sorted (its `preserve_order` feature is off), so two equal
+/// inputs always serialize alike.
+fn call_key(name: &str, input: &Value) -> u64 {
+    str_hash64(&[name, &input.to_string()])
 }
 
 fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
@@ -516,6 +557,7 @@ mod tests {
                     agent,
                     tool,
                     detail,
+                    ..
                 } => format!("tool {agent} {tool} {detail}"),
                 Kind::ToolError { agent } => format!("error {agent}"),
                 Kind::Usage { agent, tokens, .. } => format!("usage {agent} {}", tokens.fresh()),
@@ -611,6 +653,76 @@ mod tests {
         assert_eq!(got.iter().filter(|k| k.starts_with("usage")).count(), 1);
     }
 
+    fn usage_total(events: &[Event]) -> u64 {
+        events
+            .iter()
+            .map(|e| match &e.kind {
+                Kind::Usage { tokens, .. } => tokens.fresh(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn interleaved_message_ids_are_not_counted_twice() {
+        let s = Scratch::new("usage-interleaved");
+        for id in ["m1", "m2", "m1"] {
+            s.append(
+                "s1.jsonl",
+                &assistant(1, id, r#"{"type":"text","text":"a"}"#),
+            );
+        }
+        assert_eq!(usage_total(&ClaudeSource::open(&s.main()).poll()), 70);
+    }
+
+    #[test]
+    fn messages_without_an_id_each_count() {
+        let s = Scratch::new("usage-no-id");
+        for _ in 0..2 {
+            s.append(
+                "s1.jsonl",
+                &assistant(1, "", r#"{"type":"text","text":"a"}"#),
+            );
+        }
+        assert_eq!(usage_total(&ClaudeSource::open(&s.main()).poll()), 70);
+    }
+
+    #[test]
+    fn absurd_token_counts_do_not_overflow() {
+        let s = Scratch::new("usage-overflow");
+        let line = format!(
+            r#"{{"type":"assistant","timestamp":"{T}01.000Z","message":{{"id":"x","usage":{{"input_tokens":18446744073709551615,"output_tokens":7}},"content":[]}}}}"#
+        ) + "\n";
+        s.append("s1.jsonl", &line);
+        s.append("s1.jsonl", &line.replace("\"x\"", "\"y\""));
+        let mut w = crate::state::World::new("p");
+        for e in ClaudeSource::open(&s.main()).poll() {
+            w.apply(&e, false);
+        }
+        assert_eq!(w.total_tokens(), u64::MAX);
+    }
+
+    #[test]
+    fn usage_is_split_by_token_kind() {
+        let s = Scratch::new("usage-split");
+        s.append(
+            "s1.jsonl",
+            &assistant(1, "m1", r#"{"type":"text","text":"a"}"#),
+        );
+        let events = ClaudeSource::open(&s.main()).poll();
+        let got = events.iter().find_map(|e| match &e.kind {
+            Kind::Usage { tokens, model, .. } => Some((*tokens, model.as_str())),
+            _ => None,
+        });
+        let want = Tokens {
+            input: 10,
+            output: 5,
+            cache_read: 100,
+            cache_write: 20,
+        };
+        assert_eq!(got, Some((want, "m1")));
+    }
+
     #[test]
     fn usage_is_split_by_token_kind() {
         let s = Scratch::new("usage-split");
@@ -652,6 +764,95 @@ mod tests {
             got,
             vec!["finish aaa true Some(4200)", "finish bbb false Some(4200)"]
         );
+    }
+
+    #[test]
+    fn task_notification_as_user_turn_or_queue_operation_finishes_agent() {
+        let s = Scratch::new("notify-forms");
+        let block = |id: &str, status: &str| {
+            format!("<task-notification>\\n<task-id>{id}</task-id>\\n<status>{status}</status>\\n<summary>done</summary>\\n</task-notification>")
+        };
+        let lines = [
+            // The user turn itself is the notification.
+            format!(
+                r#"{{"type":"user","timestamp":"{T}01.000Z","message":{{"role":"user","content":"{}"}}}}"#,
+                block("aaa", "completed")
+            ),
+            // Queued for the parent, then taken off the queue: the same
+            // notification twice, which `World` ignores the second time.
+            format!(
+                r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"{T}02.000Z","content":"{}"}}"#,
+                block("bbb", "killed")
+            ),
+            format!(
+                r#"{{"type":"queue-operation","operation":"remove","timestamp":"{T}03.000Z","content":"{}"}}"#,
+                block("bbb", "killed")
+            ),
+            // Not final, or not a notification at all: no finish.
+            format!(
+                r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"{T}04.000Z","content":"<task-notification><task-id>ccc</task-id><event>line</event></task-notification>"}}"#
+            ),
+            format!(
+                r#"{{"type":"user","timestamp":"{T}05.000Z","message":{{"role":"user","content":"see this: {}"}}}}"#,
+                block("ddd", "completed")
+            ),
+            format!(
+                r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"{T}06.000Z","content":"{}"}}"#,
+                block("eee", "running")
+            ),
+        ];
+        for l in &lines {
+            s.append("s1.jsonl", l);
+            s.append("s1.jsonl", "\n");
+        }
+        let got = kinds(&ClaudeSource::open(&s.main()).poll());
+        assert_eq!(
+            got,
+            vec![
+                "finish aaa true None",
+                "finish bbb false None",
+                "finish bbb false None",
+                "prompt main see this: <task-notification> <task-id>ddd</task-id> <status>completed</status> <summary>done</summary> </task-notification>",
+            ]
+        );
+    }
+
+    #[test]
+    fn call_key_covers_the_whole_input() {
+        let s = Scratch::new("call-key");
+        let long =
+            "cd /a/very/long/path/that/goes/on/and/on/and/fills/the/eighty/character/summary";
+        let calls = [
+            format!(r#"{{"command":"{long} && make a"}}"#),
+            format!(r#"{{"command":"{long} && make b"}}"#),
+            format!(r#"{{"command":"{long} && make a"}}"#),
+            r#"{"file_path":"/x/lib.rs","old_string":"a","new_string":"b"}"#.to_string(),
+            r#"{"file_path":"/x/lib.rs","old_string":"b","new_string":"c"}"#.to_string(),
+            r#"{"new_string":"b","old_string":"a","file_path":"/x/lib.rs"}"#.to_string(),
+        ];
+        for (i, input) in calls.iter().enumerate() {
+            let name = if i < 3 { "Bash" } else { "Edit" };
+            let block =
+                format!(r#"{{"type":"tool_use","id":"t{i}","name":"{name}","input":{input}}}"#);
+            s.append("s1.jsonl", &assistant(i as u32, &format!("m{i}"), &block));
+        }
+        let events = ClaudeSource::open(&s.main()).poll();
+        let tools: Vec<(&str, u64)> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                Kind::Tool { detail, key, .. } => Some((detail.as_str(), *key)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools.len(), 6);
+        // Same display detail, different input: different calls.
+        assert_eq!(tools[0].0, tools[1].0);
+        assert_ne!(tools[0].1, tools[1].1);
+        assert_eq!(tools[3].0, tools[4].0);
+        assert_ne!(tools[3].1, tools[4].1);
+        // Same input, even with keys in another order: the same call.
+        assert_eq!(tools[0].1, tools[2].1);
+        assert_eq!(tools[3].1, tools[5].1);
     }
 
     #[test]

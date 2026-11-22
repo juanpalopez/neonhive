@@ -62,8 +62,17 @@ fn start_ms(w: &World) -> i64 {
         .unwrap_or(0)
 }
 
+/// When the agent started. An agent with no activity of its own (a root whose
+/// transcript is empty) has no start time; the session start stands in.
+fn agent_start_ms(w: &World, a: &Agent) -> i64 {
+    match a.spawned_ts {
+        0 => start_ms(w),
+        t => t,
+    }
+}
+
 fn duration_ms(w: &World, a: &Agent) -> i64 {
-    (a.finished_ts.unwrap_or(w.now_ts) - a.spawned_ts).max(0)
+    (a.finished_ts.unwrap_or(w.now_ts) - agent_start_ms(w, a)).max(0)
 }
 
 fn total(w: &World) -> Tokens {
@@ -244,7 +253,7 @@ pub fn json(w: &World) -> String {
                 "type": a.agent_type,
                 "label": clean(&a.label, 80),
                 "status": status_name(a.status),
-                "start_ms": a.spawned_ts,
+                "start_ms": agent_start_ms(w, a),
                 "duration_ms": duration_ms(w, a),
                 "tokens": tokens_json(&a.tokens, a.shown_tokens()),
                 "models": a.by_model.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
@@ -307,6 +316,7 @@ mod tests {
             agent: agent.into(),
             tool: name.into(),
             detail: "SECRET-DETAIL".into(),
+            key: 0,
         }
     }
 

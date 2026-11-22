@@ -132,40 +132,47 @@ fn apply(r: &Rates, t: &Tokens) -> f64 {
         / 1e6
 }
 
-/// Overrides are plain prefixes and win over the built-in table; the longest
-/// matching prefix is used.
+/// The most specific (longest) matching key wins, across both tables; on a tie
+/// the override wins. Built-in keys match a model family and its snapshots
+/// only. Override keys are prefixes, so `claude-opus-5` in a `--prices` file
+/// also covers a later `claude-opus-5-7`, but not `claude-opus-5-5`, which
+/// has a longer built-in key of its own.
 fn rates_in(overrides: &[(String, Rates)], model: &str) -> Option<Rates> {
     if model.is_empty() {
         return None;
     }
-    let pick = |best: Option<(usize, Rates)>, key: &str, rates: Rates, ok: bool| match best {
-        Some((n, _)) if n >= key.len() => best,
-        _ if ok => Some((key.len(), rates)),
-        _ => best,
-    };
-    let custom = overrides.iter().fold(None, |best, (k, r)| {
-        pick(best, k, *r, model.starts_with(k.as_str()))
-    });
-    if let Some((_, r)) = custom {
-        return Some(r);
+    let mut best: Option<(usize, Rates)> = None;
+    for (k, r) in BUILTIN {
+        if family_match(k, model) && best.is_none_or(|(n, _)| k.len() > n) {
+            best = Some((k.len(), *r));
+        }
     }
-    BUILTIN
-        .iter()
-        .fold(None, |best, (k, r)| {
-            pick(best, k, *r, family_match(k, model))
-        })
-        .map(|(_, r)| r)
+    for (k, r) in overrides {
+        if prefix_match(k, model) && best.is_none_or(|(n, _)| k.len() >= n) {
+            best = Some((k.len(), *r));
+        }
+    }
+    best.map(|(_, r)| r)
 }
 
-/// `key` names `model`, possibly behind a provider prefix
-/// (`us.anthropic.`, `anthropic/`) and followed by a snapshot suffix.
+/// Where `key` starts in `model`: at the beginning or right after a provider
+/// prefix (`us.anthropic.`, `anthropic/`). Case-insensitive.
+fn key_end(key: &str, model: &str) -> Option<usize> {
+    let key = key.to_ascii_lowercase();
+    let at = model.find(&key)?;
+    let before_ok = at == 0 || matches!(model.as_bytes()[at - 1], b'.' | b'/' | b':');
+    before_ok.then_some(at + key.len())
+}
+
+fn prefix_match(key: &str, model: &str) -> bool {
+    key_end(key, &model.to_ascii_lowercase()).is_some()
+}
+
+/// `key` names `model`, possibly behind a provider prefix and followed by a
+/// snapshot suffix.
 fn family_match(key: &str, model: &str) -> bool {
     let model = model.to_ascii_lowercase();
-    let Some(at) = model.find(key) else {
-        return false;
-    };
-    let before_ok = at == 0 || matches!(model.as_bytes()[at - 1], b'.' | b'/' | b':');
-    before_ok && snapshot_suffix(&model[at + key.len()..])
+    key_end(key, &model).is_some_and(|end| snapshot_suffix(&model[end..]))
 }
 
 /// Accepts what follows a model family when it only pins a snapshot: nothing,
@@ -258,6 +265,22 @@ mod tests {
         assert_eq!(rates_in(&table, "local-llama").unwrap().input, 0.0);
         // Entries not overridden keep the built-in price.
         assert_eq!(rates_in(&table, "claude-opus-5-5").unwrap().input, 4.0);
+    }
+
+    #[test]
+    fn a_short_override_does_not_hide_a_more_specific_built_in_price() {
+        let table = vec![("claude-opus-5".to_string(), r(99.0, 99.0, 99.0, 99.0))];
+        assert_eq!(rates_in(&table, "claude-opus-5").unwrap().input, 99.0);
+        assert_eq!(rates_in(&table, "claude-opus-5-5").unwrap().input, 4.0);
+        // No built-in key for this one, so the prefix the user gave applies.
+        assert_eq!(rates_in(&table, "claude-opus-5-7").unwrap().input, 99.0);
+    }
+
+    #[test]
+    fn overrides_apply_behind_a_provider_prefix() {
+        let table = vec![("claude-sonnet-4-5".to_string(), r(1.0, 1.0, 1.0, 1.0))];
+        let id = "us.anthropic.claude-sonnet-4-5-20250929-v1:0";
+        assert_eq!(rates_in(&table, id).unwrap().input, 1.0);
     }
 
     #[test]

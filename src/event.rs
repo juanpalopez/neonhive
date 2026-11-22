@@ -21,7 +21,10 @@ impl Tokens {
     /// reads. A long session reads the same cached context on every turn, so
     /// including reads would count that context once per turn.
     pub fn fresh(&self) -> u64 {
-        self.input + self.output + self.cache_write
+        // Saturating: counts come from files and a corrupt one must not panic.
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_write)
     }
 
     pub fn is_zero(&self) -> bool {
@@ -29,10 +32,10 @@ impl Tokens {
     }
 
     pub fn add(&mut self, o: &Tokens) {
-        self.input += o.input;
-        self.output += o.output;
-        self.cache_read += o.cache_read;
-        self.cache_write += o.cache_write;
+        self.input = self.input.saturating_add(o.input);
+        self.output = self.output.saturating_add(o.output);
+        self.cache_read = self.cache_read.saturating_add(o.cache_read);
+        self.cache_write = self.cache_write.saturating_add(o.cache_write);
     }
 
     /// Field-wise `self - o`, never below zero.
@@ -76,7 +79,12 @@ pub enum Kind {
     Tool {
         agent: String,
         tool: String,
+        /// Short display summary of the input. Lossy: never compare it.
         detail: String,
+        /// Identity of the call: equal for two calls with the same tool and
+        /// the same full input, and (barring hash collisions) different
+        /// otherwise. Used only to spot repeated calls.
+        key: u64,
     },
     ToolError {
         agent: String,

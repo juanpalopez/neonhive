@@ -2,7 +2,7 @@
 //! installed, so it doubles as a showcase and as a second `Source` adapter.
 
 use crate::event::{Event, Kind, Source, Tokens, ROOT};
-use crate::util::{hash, now_ms};
+use crate::util::{hash, now_ms, str_hash64};
 
 const TYPES: [&str; 6] = [
     "explorer",
@@ -85,6 +85,11 @@ impl DemoSource {
         hash(self.seed, self.step, 0x5EED) % n.max(1)
     }
 
+    /// A call key no other scripted call shares.
+    fn fresh_key(&self, tool: &str, detail: &str) -> u64 {
+        str_hash64(&[tool, detail, &self.step.to_string()])
+    }
+
     fn next_event(&mut self, ts: i64) -> Kind {
         if self.step == 0 {
             self.step = 1;
@@ -162,18 +167,31 @@ impl DemoSource {
                     cache_write: self.rand(4_000) as u64,
                 },
             },
-            8 => Kind::Tool {
-                agent: ROOT.into(),
-                tool: "Read".into(),
-                detail: ROOT_READS[self.step as usize % ROOT_READS.len()].into(),
-            },
+            8 => {
+                let detail = ROOT_READS[self.step as usize % ROOT_READS.len()];
+                Kind::Tool {
+                    agent: ROOT.into(),
+                    tool: "Read".into(),
+                    detail: detail.into(),
+                    key: self.fresh_key("Read", detail),
+                }
+            }
             _ => {
                 let pick = TOOLS[self.rand(TOOLS.len() as u32) as usize];
                 let (tool, detail) = if looper { LOOP_CALL } else { pick };
+                // The looper repeats one exact call. Every other call stands
+                // for a real one with its own full input, even when two share
+                // a display detail, so none of them repeats.
+                let key = if looper {
+                    str_hash64(&[tool, detail])
+                } else {
+                    self.fresh_key(tool, detail)
+                };
                 Kind::Tool {
                     agent,
                     tool: tool.into(),
                     detail: detail.into(),
+                    key,
                 }
             }
         }
