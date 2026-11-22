@@ -155,7 +155,8 @@ pub fn markdown(w: &World) -> String {
     for (k, n) in [
         ("Input", t.input),
         ("Output", t.output),
-        ("Cache write", t.cache_write),
+        ("Cache write (5 min)", t.cache_write_5m),
+        ("Cache write (1 h)", t.cache_write_1h),
         ("Cache read", t.cache_read),
     ] {
         o.push_str(&format!("| {k} | {n} |\n"));
@@ -235,7 +236,10 @@ fn tokens_json(t: &Tokens, shown: u64) -> Value {
     json!({
         "input": t.input,
         "output": t.output,
-        "cache_write": t.cache_write,
+        // `cache_write` stays the total of both kinds, as before.
+        "cache_write": t.cache_write(),
+        "cache_write_5m": t.cache_write_5m,
+        "cache_write_1h": t.cache_write_1h,
         "cache_read": t.cache_read,
         "total": shown,
     })
@@ -344,7 +348,8 @@ mod tests {
                         input: 100,
                         output: 50,
                         cache_read: 1_000,
-                        cache_write: 20,
+                        cache_write_5m: 12,
+                        cache_write_1h: 8,
                     },
                     model: "m".into(),
                 },

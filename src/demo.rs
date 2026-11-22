@@ -164,7 +164,13 @@ impl DemoSource {
                     input: 40 + self.rand(300) as u64,
                     output: 300 + self.rand(2_000) as u64,
                     cache_read: 20_000 + self.rand(60_000) as u64,
-                    cache_write: self.rand(4_000) as u64,
+                    cache_write_5m: self.rand(4_000) as u64,
+                    // Some sessions write to the 1-hour cache; show both.
+                    cache_write_1h: if n % 2 == 0 {
+                        self.rand(6_000) as u64
+                    } else {
+                        0
+                    },
                 },
             },
             8 => {
