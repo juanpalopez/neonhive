@@ -8,7 +8,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 /// A running agent with no activity for this long is shown as idle.
 const IDLE_MS: i64 = 300_000;
-const LOG_CAP: usize = 400;
+/// Event-stream lines kept for scroll-back. A line is a timestamp, an agent id
+/// and at most 160 chars of text (see `say`), about 250 bytes on average and
+/// under 1 KiB at worst, so 10,000 lines cost about 2.5 MB, 10 MB at worst.
+/// That holds the whole stream of most sessions; on the largest real sessions
+/// it is the last few hours. Appending is O(1) either way.
+const LOG_CAP: usize = 10_000;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Status {
@@ -101,6 +106,9 @@ pub struct World {
     pub agents: HashMap<String, Agent>,
     pub order: Vec<String>,
     pub log: VecDeque<LogLine>,
+    /// Lines ever logged. `log[i]` is line number `log_seq - log.len() + i`,
+    /// a number that stays put when old lines are dropped.
+    pub log_seq: u64,
     pub now_ts: i64,
     pub total_tools: u64,
     pub total_msgs: u64,
@@ -115,6 +123,7 @@ impl World {
             agents: HashMap::new(),
             order: Vec::new(),
             log: VecDeque::new(),
+            log_seq: 0,
             now_ts: 0,
             total_tools: 0,
             total_msgs: 0,
@@ -296,6 +305,7 @@ impl World {
             kind,
             text,
         });
+        self.log_seq += 1;
     }
 
     /// Resolve a message recipient given as id, id prefix, label or type.
@@ -790,6 +800,8 @@ mod tests {
             w.apply(&ev(i, tool(ROOT)), false);
         }
         assert_eq!(w.log.len(), LOG_CAP);
+        // Line numbers keep counting past the cap (a loop flag adds one).
+        assert!(w.log_seq >= LOG_CAP as u64 + 50);
     }
 
     fn spawn_typed(id: &str, agent_type: &str) -> Kind {

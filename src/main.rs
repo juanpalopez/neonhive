@@ -13,12 +13,14 @@ mod ui;
 mod util;
 mod watch;
 
-use app::{App, Mode, SPEEDS};
+use app::{App, Mode, Panel, SPEEDS};
 use clap::{Parser, Subcommand};
 use claude::{ClaudeSource, SessionInfo};
 use event::Source;
 use ratatui::backend::TestBackend;
-use ratatui::crossterm::event::{self as term_event, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self as term_event, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 use ratatui::{DefaultTerminal, Terminal};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -317,30 +319,109 @@ fn view(term: &mut DefaultTerminal, mut app: App) -> anyhow::Result<bool> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return Ok(false)
-            }
-            KeyCode::Char('q') => return Ok(false),
-            KeyCode::Esc if app.help => app.help = false,
-            KeyCode::Esc | KeyCode::Backspace => return Ok(true),
-            KeyCode::Char('?' | 'h') => app.help = !app.help,
-            KeyCode::Up | KeyCode::Char('k') => app.select(-1),
-            KeyCode::Down | KeyCode::Char('j') => app.select(1),
-            KeyCode::PageUp => app.select(-10),
-            KeyCode::PageDown => app.select(10),
-            KeyCode::Char('f') => app.follow = !app.follow,
-            KeyCode::Char('c') => app.cost_view = !app.cost_view,
-            KeyCode::Char(' ') => app.paused = !app.paused,
-            KeyCode::Char('+' | '=') => {
-                app.speed_idx = (app.speed_idx + 1).min(SPEEDS.len() - 1);
-            }
-            KeyCode::Char('-') => app.speed_idx = app.speed_idx.saturating_sub(1),
-            KeyCode::Char('r') => app.restart(),
-            KeyCode::Char('l') => app.jump_to_end(),
-            _ => {}
+        match handle_key(&mut app, key) {
+            Flow::Stay => {}
+            Flow::Back => return Ok(true),
+            Flow::Quit => return Ok(false),
         }
     }
+}
+
+/// What the viewer does after a key.
+#[derive(Debug, PartialEq)]
+enum Flow {
+    Stay,
+    /// Back to the session list.
+    Back,
+    Quit,
+}
+
+/// Maps one key press to an app change. No terminal needed, so tests can
+/// drive it. Arrows, `j`/`k` and page keys act on the focused panel: they
+/// select agents in the graph and roster and scroll the stream and inspector.
+fn handle_key(app: &mut App, key: KeyEvent) -> Flow {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl && key.code == KeyCode::Char('c') {
+        return Flow::Quit;
+    }
+    if app.panes.input {
+        // The query line takes every key, so typing `q` does not quit.
+        match key.code {
+            KeyCode::Esc => app.search_clear(),
+            KeyCode::Enter => app.search_confirm(),
+            KeyCode::Backspace => {
+                app.panes.query.pop();
+            }
+            KeyCode::Char(c) if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) => {
+                app.panes.query.push(c);
+            }
+            _ => {}
+        }
+        return Flow::Stay;
+    }
+    let focus = app.panes.focus;
+    // Move the focused panel by `rows`: change the selection or scroll.
+    let mv = |app: &mut App, rows: i64| match focus {
+        Panel::Stream => app.scroll_stream(rows),
+        Panel::Inspector => app.scroll_inspector(rows),
+        Panel::Graph | Panel::Roster => app.select(rows.clamp(-10, 10) as i32),
+    };
+    let page = match focus {
+        Panel::Stream => app.stream_page(),
+        Panel::Inspector => app.panes.inspect_rows.saturating_sub(1).max(1) as i64,
+        _ => 10,
+    };
+    match key.code {
+        KeyCode::Char('q') => return Flow::Quit,
+        // Esc unwinds one layer at a time: help, full size, search, then back.
+        KeyCode::Esc | KeyCode::Backspace => {
+            if app.help {
+                app.help = false;
+            } else if app.panes.maximised {
+                app.panes.maximised = false;
+            } else if !app.panes.query.is_empty() {
+                app.search_clear();
+            } else {
+                return Flow::Back;
+            }
+        }
+        KeyCode::Char('?' | 'h') => app.help = !app.help,
+        KeyCode::Tab => app.cycle_focus(1),
+        KeyCode::BackTab => app.cycle_focus(-1),
+        KeyCode::Char('z') => app.panes.maximised = !app.panes.maximised,
+        KeyCode::Char('[') => app.resize_stream(-1),
+        KeyCode::Char(']') => app.resize_stream(1),
+        KeyCode::Char('<') => app.resize_side(-2),
+        KeyCode::Char('>') => app.resize_side(2),
+        KeyCode::Up | KeyCode::Char('k') => mv(app, -1),
+        KeyCode::Down | KeyCode::Char('j') => mv(app, 1),
+        KeyCode::PageUp => mv(app, -page),
+        KeyCode::PageDown => mv(app, page),
+        // Ends of the stream, or of the inspector when that has focus.
+        KeyCode::Home | KeyCode::Char('g') if focus == Panel::Inspector => {
+            app.scroll_inspector(i64::MIN);
+        }
+        KeyCode::End | KeyCode::Char('G') if focus == Panel::Inspector => {
+            app.scroll_inspector(i64::MAX);
+        }
+        KeyCode::Home | KeyCode::Char('g') => app.stream_top(),
+        KeyCode::End | KeyCode::Char('G') => app.stream_tail(),
+        KeyCode::Char('/') => app.search_open(),
+        KeyCode::Char('n') => app.search_step(true),
+        KeyCode::Char('N') => app.search_step(false),
+        KeyCode::Char('&') => app.panes.filter = !app.panes.filter,
+        KeyCode::Char('f') => app.follow = !app.follow,
+        KeyCode::Char('c') => app.cost_view = !app.cost_view,
+        KeyCode::Char(' ') => app.paused = !app.paused,
+        KeyCode::Char('+' | '=') => {
+            app.speed_idx = (app.speed_idx + 1).min(SPEEDS.len() - 1);
+        }
+        KeyCode::Char('-') => app.speed_idx = app.speed_idx.saturating_sub(1),
+        KeyCode::Char('r') => app.restart(),
+        KeyCode::Char('l') => app.jump_to_end(),
+        _ => {}
+    }
+    Flow::Stay
 }
 
 /// Headless render of one frame, for tests, screenshots and bug reports.
@@ -386,4 +467,291 @@ fn snapshot(args: &Args, secs: f64) -> anyhow::Result<()> {
         println!("{}", row.trim_end());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn demo_app() -> App {
+        let mut app = App::new(
+            Box::new(demo::DemoSource::new(3)),
+            Mode::Live,
+            "demo",
+            "demo",
+        );
+        for _ in 0..900 {
+            app.tick(1.0 / 30.0);
+        }
+        assert!(app.world.log.len() > 40, "demo should have logged lines");
+        app
+    }
+
+    fn press(app: &mut App, code: KeyCode) -> Flow {
+        handle_key(app, KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn typed(app: &mut App, s: &str) {
+        for c in s.chars() {
+            assert_eq!(press(app, KeyCode::Char(c)), Flow::Stay);
+        }
+    }
+
+    /// Text of the bottom line the stream shows.
+    fn bottom_text(app: &App) -> String {
+        let list = app.stream_list();
+        let b = app.stream_bottom(&list).unwrap();
+        app.world.log[list[b]].text.clone()
+    }
+
+    #[test]
+    fn tab_cycles_focus_and_skips_hidden_panels() {
+        let mut app = demo_app();
+        assert_eq!(app.panes.focus, Panel::Graph);
+        let order = [Panel::Inspector, Panel::Roster, Panel::Stream, Panel::Graph];
+        for want in order {
+            press(&mut app, KeyCode::Tab);
+            assert_eq!(app.panes.focus, want);
+        }
+        press(&mut app, KeyCode::BackTab);
+        assert_eq!(app.panes.focus, Panel::Stream);
+        // Narrow terminal: no side column, so only graph and stream.
+        app.panes.side_shown = false;
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.panes.focus, Panel::Graph);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.panes.focus, Panel::Stream);
+        // Full size can show any panel.
+        app.panes.maximised = true;
+        press(&mut app, KeyCode::Tab);
+        press(&mut app, KeyCode::Tab);
+        assert_eq!(app.panes.focus, Panel::Inspector);
+    }
+
+    #[test]
+    fn query_line_takes_every_key() {
+        let mut app = demo_app();
+        assert_eq!(press(&mut app, KeyCode::Char('/')), Flow::Stay);
+        assert!(app.panes.input);
+        assert_eq!(app.panes.focus, Panel::Stream);
+        let (sel, follow, speed) = (app.selected, app.follow, app.speed_idx);
+        typed(&mut app, "q?jkfcrlz+-n&G[<");
+        assert_eq!(app.panes.query, "q?jkfcrlz+-n&G[<");
+        assert!(!app.help && !app.panes.maximised && !app.panes.filter);
+        assert_eq!(
+            (app.selected, app.follow, app.speed_idx),
+            (sel, follow, speed)
+        );
+        assert_eq!(press(&mut app, KeyCode::Backspace), Flow::Stay);
+        assert_eq!(app.panes.query, "q?jkfcrlz+-n&G[");
+        // Esc cancels and clears; it does not leave the view.
+        assert_eq!(press(&mut app, KeyCode::Esc), Flow::Stay);
+        assert!(!app.panes.input && app.panes.query.is_empty());
+        // Ctrl-C still quits from the query line.
+        press(&mut app, KeyCode::Char('/'));
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(handle_key(&mut app, ctrl_c), Flow::Quit);
+        assert_eq!(press(&mut app, KeyCode::Esc), Flow::Stay);
+        assert_eq!(press(&mut app, KeyCode::Char('q')), Flow::Quit);
+    }
+
+    #[test]
+    fn esc_unwinds_one_layer_at_a_time() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Char('z'));
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "read");
+        // Esc on the open query line drops only the query.
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.panes.input && app.panes.query.is_empty() && app.panes.maximised);
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "read");
+        press(&mut app, KeyCode::Enter);
+        assert!(!app.panes.input);
+        assert_eq!(app.panes.query, "read");
+        app.help = true;
+        let steps: [fn(&App) -> bool; 3] = [
+            |a| !a.help && a.panes.maximised,
+            |a| !a.panes.maximised && a.panes.query == "read",
+            |a| a.panes.query.is_empty(),
+        ];
+        for done in steps {
+            assert_eq!(press(&mut app, KeyCode::Esc), Flow::Stay);
+            assert!(done(&app));
+        }
+        assert_eq!(press(&mut app, KeyCode::Esc), Flow::Back);
+        assert_eq!(press(&mut app, KeyCode::Backspace), Flow::Back);
+    }
+
+    #[test]
+    fn arrows_act_on_the_focused_panel() {
+        let mut app = demo_app();
+        app.follow = true;
+        let sel = app.selected;
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.selected, sel.saturating_sub(1));
+        assert!(!app.follow);
+        // Stream: scrolls, selection stays.
+        app.panes.focus = Panel::Stream;
+        let sel = app.selected;
+        press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.selected, sel);
+        assert!(app.panes.anchor.is_some());
+        // Inspector: scrolls within what the renderer measured.
+        app.panes.focus = Panel::Inspector;
+        app.panes.inspect_max = 5;
+        app.panes.inspect_rows = 3;
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.panes.inspect_scroll, 1);
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(app.panes.inspect_scroll, 3);
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.panes.inspect_scroll, 5);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.panes.inspect_scroll, 5);
+        press(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.panes.inspect_scroll, 0);
+        press(&mut app, KeyCode::Up);
+        assert_eq!(app.panes.inspect_scroll, 0);
+        assert_eq!(app.selected, sel);
+    }
+
+    #[test]
+    fn stream_scroll_is_clamped_at_both_ends() {
+        let mut app = demo_app();
+        app.panes.focus = Panel::Stream;
+        let rows = app.panes.stream_rows;
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.panes.anchor, None, "already at the tail");
+        press(&mut app, KeyCode::Char('g'));
+        let list = app.stream_list();
+        assert_eq!(
+            app.stream_bottom(&list),
+            Some(rows - 1),
+            "top fills the panel"
+        );
+        for _ in 0..3 {
+            press(&mut app, KeyCode::Up);
+            press(&mut app, KeyCode::PageUp);
+        }
+        assert_eq!(app.stream_bottom(&list), Some(rows - 1));
+        press(&mut app, KeyCode::PageDown);
+        assert_eq!(app.stream_bottom(&list), Some(rows - 1 + rows - 1));
+        press(&mut app, KeyCode::End);
+        assert_eq!(app.panes.anchor, None);
+        // Scrolling down to the newest line follows again.
+        press(&mut app, KeyCode::Up);
+        press(&mut app, KeyCode::Up);
+        assert!(app.panes.anchor.is_some());
+        press(&mut app, KeyCode::Down);
+        press(&mut app, KeyCode::Down);
+        assert_eq!(app.panes.anchor, None);
+    }
+
+    #[test]
+    fn scrolled_back_stream_pauses_and_counts_new_lines() {
+        let mut app = demo_app();
+        app.panes.focus = Panel::Stream;
+        press(&mut app, KeyCode::PageUp);
+        let seen = bottom_text(&app);
+        let anchor = app.panes.anchor;
+        assert!(anchor.is_some());
+        assert_eq!(app.new_lines(), 0);
+        let before = app.world.log_seq;
+        for _ in 0..300 {
+            app.tick(1.0 / 30.0);
+        }
+        assert!(app.world.log_seq > before, "demo keeps logging");
+        assert_eq!(app.panes.anchor, anchor, "paused view does not move");
+        assert_eq!(bottom_text(&app), seen);
+        assert_eq!(app.new_lines(), app.world.log_seq - before);
+        press(&mut app, KeyCode::Char('G'));
+        assert_eq!(app.panes.anchor, None);
+        assert_eq!(app.new_lines(), 0);
+    }
+
+    #[test]
+    fn restart_and_jump_to_end_drop_the_scroll_position() {
+        let mut app = App::new(Box::new(demo::DemoSource::new(4)), Mode::Replay, "d", "d");
+        for _ in 0..1800 {
+            app.tick(1.0 / 30.0);
+        }
+        app.panes.focus = Panel::Stream;
+        press(&mut app, KeyCode::Char('g'));
+        assert!(app.panes.anchor.is_some());
+        press(&mut app, KeyCode::Char('r'));
+        assert_eq!(app.panes.anchor, None);
+        assert_eq!(app.new_lines(), 0);
+        for _ in 0..600 {
+            app.tick(1.0 / 30.0);
+        }
+        press(&mut app, KeyCode::PageUp);
+        assert!(app.panes.anchor.is_some());
+        press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.panes.anchor, None);
+        // Still scrollable afterwards, with no stale offset.
+        press(&mut app, KeyCode::Char('k'));
+        let list = app.stream_list();
+        assert_eq!(app.stream_bottom(&list), Some(list.len() - 2));
+    }
+
+    #[test]
+    fn n_and_shift_n_walk_matches_and_wrap() {
+        let mut app = demo_app();
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "READ");
+        press(&mut app, KeyCode::Enter);
+        let matches = app.matches();
+        assert!(matches.len() >= 2, "demo reads files");
+        let no = |app: &App, k: usize| app.log_no(matches[k]);
+        let last = matches.len() - 1;
+        assert_eq!(
+            app.panes.current,
+            Some(no(&app, last)),
+            "enter: newest match"
+        );
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.panes.current, Some(no(&app, last - 1)));
+        press(&mut app, KeyCode::Char('N'));
+        press(&mut app, KeyCode::Char('N'));
+        assert_eq!(app.panes.current, Some(no(&app, 0)), "wraps to the oldest");
+        // The match is on screen.
+        let list = app.stream_list();
+        let b = app.stream_bottom(&list).unwrap();
+        let pos = list.iter().position(|&i| i == matches[0]).unwrap();
+        assert!(pos <= b && pos + app.panes.stream_rows > b);
+        // Grep mode lists only the matches.
+        press(&mut app, KeyCode::Char('&'));
+        assert!(app.filtering());
+        assert_eq!(app.stream_list(), matches);
+        // No match: nothing current, and keys still do not panic.
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, "zzz no such text");
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.panes.current, None);
+        assert!(app.stream_list().is_empty());
+        press(&mut app, KeyCode::Char('k'));
+        press(&mut app, KeyCode::Char('g'));
+        press(&mut app, KeyCode::Char('n'));
+    }
+
+    #[test]
+    fn resize_keys_stay_within_bounds() {
+        let mut app = demo_app();
+        app.panes.term = (140, 40);
+        for _ in 0..100 {
+            press(&mut app, KeyCode::Char(']'));
+            press(&mut app, KeyCode::Char('>'));
+        }
+        assert_eq!(app.panes.stream_h, 40 - 2 - app::BODY_MIN_H);
+        assert_eq!(app.panes.side_w, 140 - app::GRAPH_MIN_W);
+        for _ in 0..100 {
+            press(&mut app, KeyCode::Char('['));
+            press(&mut app, KeyCode::Char('<'));
+        }
+        assert_eq!(app.panes.stream_h, app::STREAM_MIN_H);
+        assert_eq!(app.panes.side_w, app::SIDE_MIN_W);
+        press(&mut app, KeyCode::Char(']'));
+        assert_eq!(app.panes.stream_h, app::STREAM_MIN_H + 1);
+    }
 }

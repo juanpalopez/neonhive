@@ -1,8 +1,8 @@
 //! View model: playback clock, graph layout and animation state.
 
 use crate::event::{Event, Kind, Source, ROOT};
-use crate::state::{Fx, PacketKind, Status, World};
-use crate::util::now_ms;
+use crate::state::{Fx, LogLine, PacketKind, Status, World};
+use crate::util::{clean, contains_ci, needle, now_ms};
 use std::collections::{HashMap, VecDeque};
 use std::f32::consts::{FRAC_PI_2, TAU};
 
@@ -66,6 +66,8 @@ pub struct App {
     pub help: bool,
     /// The roster panel shows cost by agent type instead of agents.
     pub cost_view: bool,
+    /// Focus, panel sizes, scroll positions and the stream search.
+    pub panes: Panes,
 }
 
 impl App {
@@ -96,6 +98,7 @@ impl App {
             hidden: 0,
             help: false,
             cost_view: false,
+            panes: Panes::default(),
         };
         if mode == Mode::Live {
             app.jump_to_end();
@@ -119,6 +122,7 @@ impl App {
         }
         self.world.fx.clear();
         self.mode = Mode::Live;
+        self.stream_tail();
         if let Some(last) = self.world.order.iter().rposition(|id| id != ROOT) {
             self.selected = last;
         }
@@ -134,6 +138,7 @@ impl App {
         self.packets.clear();
         self.selected = 0;
         self.follow = true;
+        self.stream_tail();
     }
 
     pub fn select(&mut self, delta: i32) {
@@ -227,6 +232,10 @@ impl App {
             self.activity.push_back(self.act_acc);
             self.act_acc = 0;
         }
+        if self.panes.inspect_for != self.selected {
+            self.panes.inspect_for = self.selected;
+            self.panes.inspect_scroll = 0;
+        }
     }
 
     fn update_nodes(&mut self, dt: f64) {
@@ -281,6 +290,343 @@ impl App {
         }
         self.nodes
             .retain(|_, n| n.dying.is_none_or(|d| clock - d < DYING_SECS));
+    }
+}
+
+// ------------------------------------------------------------------ panes
+
+/// A panel that can take keyboard focus.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Panel {
+    #[default]
+    Graph,
+    Inspector,
+    Roster,
+    Stream,
+}
+
+impl Panel {
+    const ORDER: [Panel; 4] = [Panel::Graph, Panel::Inspector, Panel::Roster, Panel::Stream];
+
+    /// The panel `delta` steps away in focus order. Without the side column
+    /// (narrow terminal) the inspector and roster are skipped.
+    pub fn step(self, delta: i32, with_side: bool) -> Panel {
+        let usable = |p: &Panel| with_side || matches!(p, Panel::Graph | Panel::Stream);
+        let ring: Vec<Panel> = Self::ORDER.iter().copied().filter(usable).collect();
+        let at = ring.iter().position(|p| *p == self).unwrap_or(0) as i32;
+        ring[(at + delta).rem_euclid(ring.len() as i32) as usize]
+    }
+}
+
+/// Default event-stream height in rows, borders included.
+pub const STREAM_H: u16 = 9;
+/// Smallest event stream: two lines of text.
+pub const STREAM_MIN_H: u16 = 4;
+/// Rows the graph keeps however tall the stream gets.
+pub const BODY_MIN_H: u16 = 8;
+/// Default side column (inspector and roster) width.
+pub const SIDE_W: u16 = 40;
+/// Narrowest side column that still shows a readable inspector.
+pub const SIDE_MIN_W: u16 = 30;
+/// Columns the graph keeps however wide the side column gets.
+pub const GRAPH_MIN_W: u16 = 60;
+/// Terminals narrower than this show the graph without a side column.
+pub const SIDE_MIN_TERM_W: u16 = 104;
+
+/// Stream height used in a terminal `term_h` rows tall: the preference,
+/// clamped so header, footer and `BODY_MIN_H` rows of graph still fit.
+pub fn stream_height(pref: u16, term_h: u16) -> u16 {
+    let avail = term_h.saturating_sub(2);
+    let max = avail
+        .saturating_sub(BODY_MIN_H)
+        .max(STREAM_MIN_H)
+        .min(avail);
+    pref.clamp(STREAM_MIN_H.min(max), max)
+}
+
+/// Side column width used in a terminal `term_w` columns wide.
+pub fn side_width(pref: u16, term_w: u16) -> u16 {
+    let max = term_w.saturating_sub(GRAPH_MIN_W).max(SIDE_MIN_W);
+    pref.clamp(SIDE_MIN_W, max)
+}
+
+/// View state that is not about the agents: focus, sizes, scroll positions
+/// and the event-stream search. The renderer reads it and writes back only
+/// what it measured (`term`, `stream_rows`, `inspect_*`, `side_shown`).
+pub struct Panes {
+    pub focus: Panel,
+    /// The focused panel fills the whole body.
+    pub maximised: bool,
+    /// Preferred event-stream height and side-column width. The size used is
+    /// clamped to the terminal (`stream_height`, `side_width`); the key
+    /// handlers clamp the preference to the current terminal, and a terminal
+    /// that shrinks and grows back gets the same sizes again.
+    pub stream_h: u16,
+    pub side_w: u16,
+    /// Line number (`World::log_seq` numbering) of the bottom line shown in
+    /// the event stream; `None` follows the tail.
+    pub anchor: Option<u64>,
+    /// `World::log_seq` when the stream stopped following.
+    paused_at: u64,
+    pub inspect_scroll: usize,
+    /// The selection the inspector scroll belongs to.
+    inspect_for: usize,
+    /// Search query; empty when there is no search.
+    pub query: String,
+    /// The query line is open and takes every key.
+    pub input: bool,
+    /// Show only the lines that match the query.
+    pub filter: bool,
+    /// Line number of the match that `n` / `N` moved to.
+    pub current: Option<u64>,
+    /// Measured by the renderer: terminal size, text rows of the stream
+    /// panel, largest useful inspector scroll, whether the side column shows.
+    pub term: (u16, u16),
+    pub stream_rows: usize,
+    pub inspect_rows: usize,
+    pub inspect_max: usize,
+    pub side_shown: bool,
+}
+
+impl Default for Panes {
+    fn default() -> Self {
+        Self {
+            focus: Panel::Graph,
+            maximised: false,
+            stream_h: STREAM_H,
+            side_w: SIDE_W,
+            anchor: None,
+            paused_at: 0,
+            inspect_scroll: 0,
+            inspect_for: 0,
+            query: String::new(),
+            input: false,
+            filter: false,
+            current: None,
+            term: (140, 40),
+            stream_rows: STREAM_H as usize - 2,
+            inspect_rows: 10,
+            inspect_max: 0,
+            side_shown: true,
+        }
+    }
+}
+
+/// The agent column of a stream line, as shown and as searched.
+pub fn log_who(world: &World, l: &LogLine) -> String {
+    let who = world
+        .agents
+        .get(&l.agent)
+        .map_or(&l.agent, |a| &a.agent_type);
+    clean(who, 14)
+}
+
+impl App {
+    pub fn cycle_focus(&mut self, delta: i32) {
+        let with_side = self.panes.side_shown || self.panes.maximised;
+        self.panes.focus = self.panes.focus.step(delta, with_side);
+    }
+
+    pub fn resize_stream(&mut self, delta: i32) {
+        let p = &mut self.panes;
+        let now = stream_height(p.stream_h, p.term.1) as i32;
+        p.stream_h = stream_height((now + delta).max(0) as u16, p.term.1);
+    }
+
+    pub fn resize_side(&mut self, delta: i32) {
+        let p = &mut self.panes;
+        let now = side_width(p.side_w, p.term.0) as i32;
+        p.side_w = side_width((now + delta).max(0) as u16, p.term.0);
+    }
+
+    /// Line number of `log[i]`.
+    pub fn log_no(&self, i: usize) -> u64 {
+        self.world.log_seq - self.world.log.len() as u64 + i as u64
+    }
+
+    /// Whether the stream shows only matching lines right now.
+    pub fn filtering(&self) -> bool {
+        self.panes.filter && !self.panes.query.is_empty()
+    }
+
+    /// Indices into `world.log` of the lines matching the query.
+    pub fn matches(&self) -> Vec<usize> {
+        let n = needle(&self.panes.query);
+        if n.is_empty() {
+            return Vec::new();
+        }
+        let w = &self.world;
+        // The agent column depends only on the agent: test it once each.
+        let mut who: HashMap<&str, bool> = HashMap::new();
+        (0..w.log.len())
+            .filter(|&i| {
+                let l = &w.log[i];
+                contains_ci(&l.text, &n)
+                    || *who
+                        .entry(l.agent.as_str())
+                        .or_insert_with(|| contains_ci(&log_who(w, l), &n))
+            })
+            .collect()
+    }
+
+    /// Indices into `world.log` the stream can show, oldest first: every
+    /// line, or only the matches while filtering.
+    pub fn stream_list(&self) -> Vec<usize> {
+        if self.filtering() {
+            self.matches()
+        } else {
+            (0..self.world.log.len()).collect()
+        }
+    }
+
+    /// Position in `list` of the bottom line shown.
+    pub fn stream_bottom(&self, list: &[usize]) -> Option<usize> {
+        let last = list.len().checked_sub(1)?;
+        let Some(anchor) = self.panes.anchor else {
+            return Some(last);
+        };
+        // The last listed line at or before the anchor; the oldest one if the
+        // anchor line has been dropped from the log.
+        let n = list.partition_point(|&i| self.log_no(i) <= anchor);
+        Some(n.saturating_sub(1).min(last))
+    }
+
+    /// Lines logged since the stream stopped following.
+    pub fn new_lines(&self) -> u64 {
+        match self.panes.anchor {
+            Some(_) => self.world.log_seq.saturating_sub(self.panes.paused_at),
+            None => 0,
+        }
+    }
+
+    fn pin_stream(&mut self, line: u64) {
+        if self.panes.anchor.is_none() {
+            self.panes.paused_at = self.world.log_seq;
+        }
+        self.panes.anchor = Some(line);
+    }
+
+    /// Follow new lines again.
+    pub fn stream_tail(&mut self) {
+        self.panes.anchor = None;
+        self.panes.current = None;
+    }
+
+    /// Move the stream view by `delta` rows; negative is back in time.
+    /// Reaching the newest line follows the tail again.
+    pub fn scroll_stream(&mut self, delta: i64) {
+        let list = self.stream_list();
+        let Some(bottom) = self.stream_bottom(&list) else {
+            return;
+        };
+        let last = list.len() - 1;
+        let lowest = self.panes.stream_rows.max(1).saturating_sub(1).min(last);
+        let to = (bottom as i64).saturating_add(delta);
+        let to = to.clamp(lowest as i64, last as i64) as usize;
+        if to == last {
+            self.panes.anchor = None;
+        } else {
+            self.pin_stream(self.log_no(list[to]));
+        }
+    }
+
+    /// Oldest line at the top of the panel.
+    pub fn stream_top(&mut self) {
+        self.scroll_stream(i64::MIN);
+    }
+
+    /// One page of stream rows.
+    pub fn stream_page(&self) -> i64 {
+        self.panes.stream_rows.saturating_sub(1).max(1) as i64
+    }
+
+    /// Open the query line for a new search.
+    pub fn search_open(&mut self) {
+        let p = &mut self.panes;
+        p.input = true;
+        p.query.clear();
+        p.current = None;
+        p.focus = Panel::Stream;
+    }
+
+    /// Close the query line and go to the newest match on screen or above.
+    pub fn search_confirm(&mut self) {
+        self.panes.input = false;
+        if self.panes.query.is_empty() {
+            self.search_clear();
+        } else {
+            self.search_step(true);
+        }
+    }
+
+    pub fn search_clear(&mut self) {
+        let p = &mut self.panes;
+        p.input = false;
+        p.query.clear();
+        p.filter = false;
+        p.current = None;
+    }
+
+    /// Go to the next older or newer match, wrapping around, and scroll it
+    /// into view.
+    pub fn search_step(&mut self, older: bool) {
+        let nos: Vec<u64> = self.matches().iter().map(|&i| self.log_no(i)).collect();
+        let (Some(&first), Some(&last)) = (nos.first(), nos.last()) else {
+            self.panes.current = None;
+            return;
+        };
+        let from = match self.panes.current.filter(|c| nos.contains(c)) {
+            Some(c) => c,
+            None => {
+                // Start from the bottom line shown; it is itself a candidate
+                // for the first older match.
+                let list = self.stream_list();
+                let bottom = self.stream_bottom(&list).map(|b| self.log_no(list[b]));
+                let at = bottom.unwrap_or(last);
+                if older {
+                    at.saturating_add(1)
+                } else {
+                    at
+                }
+            }
+        };
+        let pick = if older {
+            nos.iter()
+                .rev()
+                .find(|&&n| n < from)
+                .copied()
+                .unwrap_or(last)
+        } else {
+            nos.iter().find(|&&n| n > from).copied().unwrap_or(first)
+        };
+        self.panes.current = Some(pick);
+        self.reveal(pick);
+    }
+
+    /// Scroll the stream so line `no` shows, centred, if it is off screen.
+    fn reveal(&mut self, no: u64) {
+        let list = self.stream_list();
+        let Some(bottom) = self.stream_bottom(&list) else {
+            return;
+        };
+        let Some(pos) = list.iter().position(|&i| self.log_no(i) == no) else {
+            return;
+        };
+        let rows = self.panes.stream_rows.max(1);
+        if pos <= bottom && pos + rows > bottom {
+            return; // already on screen; a following stream keeps following
+        }
+        let to = (pos + rows / 2).clamp((rows - 1).min(list.len() - 1), list.len() - 1);
+        self.pin_stream(self.log_no(list[to]));
+    }
+
+    /// Scroll the inspector by `delta` rows. Stops following, so the agent
+    /// being read does not change underneath.
+    pub fn scroll_inspector(&mut self, delta: i64) {
+        let p = &mut self.panes;
+        let to = (p.inspect_scroll as i64).saturating_add(delta);
+        p.inspect_scroll = to.clamp(0, p.inspect_max as i64) as usize;
+        self.follow = false;
     }
 }
 
@@ -524,6 +870,65 @@ mod tests {
         app.restart();
         assert_eq!(app.world.order.len(), 1);
         assert!(app.nodes.is_empty());
+    }
+
+    #[test]
+    fn paused_stream_survives_lines_dropping_off_the_log() {
+        let mut app = App::new(Box::new(DemoSource::new(2)), Mode::Live, "demo", "demo");
+        let text = |i: i64| Kind::Text {
+            agent: ROOT.into(),
+            text: format!("line {i}"),
+        };
+        for i in 0..100 {
+            app.world.apply(
+                &Event {
+                    ts: i,
+                    kind: text(i),
+                },
+                false,
+            );
+        }
+        app.stream_top();
+        let anchor = app.panes.anchor.expect("scrolled back");
+        // Push enough lines that the anchored one is dropped.
+        for i in 100..20_100 {
+            app.world.apply(
+                &Event {
+                    ts: i,
+                    kind: text(i),
+                },
+                false,
+            );
+        }
+        assert!(anchor < app.log_no(0), "anchor line is gone");
+        let list = app.stream_list();
+        assert_eq!(app.stream_bottom(&list), Some(0), "shows the oldest kept");
+        assert!(app.new_lines() >= 20_000);
+        app.scroll_stream(-1);
+        assert_eq!(
+            app.stream_bottom(&app.stream_list()),
+            Some(app.panes.stream_rows - 1),
+            "clamped to a full panel"
+        );
+        app.scroll_stream(i64::MAX);
+        assert_eq!(app.panes.anchor, None);
+    }
+
+    #[test]
+    fn panel_sizes_clamp_to_the_terminal() {
+        assert_eq!(stream_height(STREAM_H, 40), STREAM_H);
+        assert_eq!(stream_height(100, 40), 40 - 2 - BODY_MIN_H);
+        assert_eq!(stream_height(0, 40), STREAM_MIN_H);
+        // The preference outlives a small terminal.
+        assert_eq!(stream_height(20, 16), STREAM_MIN_H.max(16 - 2 - BODY_MIN_H));
+        assert_eq!(stream_height(20, 60), 20);
+        for h in 0..80 {
+            assert!(stream_height(9, h) <= h.saturating_sub(2), "h={h}");
+        }
+        assert_eq!(side_width(SIDE_W, 140), SIDE_W);
+        assert_eq!(side_width(500, 140), 140 - GRAPH_MIN_W);
+        assert_eq!(side_width(0, 140), SIDE_MIN_W);
+        assert_eq!(side_width(SIDE_W, SIDE_MIN_TERM_W), SIDE_W);
     }
 
     #[test]

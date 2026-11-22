@@ -38,7 +38,8 @@ neonhive --demo
 - **Live agent graph.** Main agent in the centre, subagents around it, nested subagents further out. Nodes glitch into existence, pulse while they work and dim when they finish.
 - **Message flow.** Coloured packets travel along edges: magenta for a spawn, green for a returned result, yellow for a message between agents, red for a failure.
 - **Inspector.** Select an agent to see its prompt, parent, model, tokens, cost, tool calls, errors and last output.
-- **Event stream.** A running log of spawns, tool calls, messages and results, coloured by agent.
+- **Event stream.** A running log of spawns, tool calls, messages and results, coloured by agent. Scroll back through the last 10,000 lines; the stream pauses while you read and counts what arrived meanwhile. Press `/` to search it, `n` and `N` to move between matches, and `&` to show matching lines only.
+- **Panels your size.** `tab` moves focus between the graph, inspector, roster and stream. Resize the stream and the side column, or press `z` to show the focused panel full size; the full-size inspector shows the whole prompt and last output.
 - **Replay.** Open any past session and watch it again at 1x to 128x. Dead time is skipped, so a three-hour session takes minutes.
 - **Scales to big sessions.** Hundreds of subagents stay readable: active agents hold the screen, finished ones dissolve into an archive counter.
 
@@ -194,7 +195,16 @@ recorded a result for it.
 
 | Key | Action |
 | --- | --- |
-| `↑` `↓` or `j` `k` | Select an agent |
+| `tab` `shift-tab` | Move focus between graph, inspector, roster and event stream |
+| `↑` `↓` or `j` `k` | Graph or roster focused: select an agent. Stream or inspector focused: scroll a line |
+| `PgUp` `PgDn` | The same, ten agents or a page at a time |
+| `g` `G` or `Home` `End` | Stream: oldest line, back to the newest (follow again). Inspector focused: top, bottom |
+| `z` | Show the focused panel full size, or restore it |
+| `[` `]` | Shorter or taller event stream |
+| `<` `>` | Narrower or wider side column (inspector and roster) |
+| `/` | Search the event stream: type, `enter` to keep, `esc` to drop |
+| `n` `N` | Older or newer match |
+| `&` | Show matching lines only, or all lines |
 | `f` | Follow the most recently active agent |
 | `c` | Switch the roster between agents and cost by agent type |
 | `space` | Pause or resume a replay |
@@ -202,8 +212,15 @@ recorded a result for it.
 | `r` | Replay the session from its start |
 | `l` | Jump to the end and follow live |
 | `?` | Help |
-| `esc` | Back to the session list |
+| `esc` | One step back: close the search line, leave full size, clear the search, then back to the session list |
 | `q` | Quit |
+
+Search is a case-insensitive substring match on the agent type and the text of each
+line. While the search line is open every key goes to it, so `q` types a `q`.
+Scrolling the stream back pauses it: the title shows `PAUSED` and how many lines
+arrived since; `G` or scrolling down to the last line follows again. Panel sizes
+are kept within limits that leave every panel usable and adapt when the terminal is
+resized.
 
 ### Cost estimates
 
