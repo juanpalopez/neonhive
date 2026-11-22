@@ -135,7 +135,7 @@ impl CodexSource {
                         agent_type: if m.role.is_empty() {
                             "agent".into()
                         } else {
-                            m.role.clone()
+                            m.role
                         },
                         label,
                     },
