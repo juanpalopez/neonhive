@@ -13,4 +13,5 @@ See CONTRIBUTING.md.
 - [ ] `cargo fmt --check`
 - [ ] `cargo clippy --all-targets -- -D warnings`
 - [ ] `cargo test`
+- [ ] Changelog: an entry under `## [Unreleased]` in `CHANGELOG.md` for `feat`, `fix`, `perf` or breaking changes (or ask a maintainer for the `skip-changelog` label)
 - [ ] For visual changes: before and after frames (`--demo --snapshot 20`, as text or `--svg`)
