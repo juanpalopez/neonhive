@@ -57,9 +57,10 @@ Replace `x.y.z` with the new version (Semantic Versioning).
 
 ## What the workflow does
 
-1. `verify tag`: the tag is `vX.Y.Z`, `Cargo.toml` has the same version, and
-   `CHANGELOG.md` has a `## [X.Y.Z] - YYYY-MM-DD` heading. Otherwise the run fails with
-   an error saying which one is off.
+1. `verify tag`: the tagged commit is on `main` (an ancestor of, or equal to,
+   `origin/main`; a tag on any other branch never publishes), the tag is `vX.Y.Z`,
+   `Cargo.toml` has the same version, and `CHANGELOG.md` has a `## [X.Y.Z] - YYYY-MM-DD`
+   heading. Otherwise the run fails with an error saying which one is off.
 2. `ci`: the same fmt, clippy and test jobs as pull requests, on the tagged commit.
 3. `github release`: creates the GitHub Release for the tag, with that version's changelog
    section as the notes. If the release already exists, its notes are updated.
@@ -84,7 +85,12 @@ crates.io documentation if you want to switch.
 
 ## If a release fails
 
-- `verify tag` fails: the tag points at a commit where `Cargo.toml` or `CHANGELOG.md`
+- `verify tag` fails with "is not on main": the tag points at a commit that is not in
+  `main`, for example a branch commit. Nothing was published. Delete the tag
+  (`git tag -d vx.y.z && git push origin :refs/tags/vx.y.z`), merge the release pull
+  request, then tag the merge commit on an up-to-date `main` as in step 6. The same
+  check fails if `origin main` could not be fetched; re-run the workflow in that case.
+- `verify tag` fails on the version or changelog: the tag points at a commit where `Cargo.toml` or `CHANGELOG.md`
   is wrong. Nothing was published. Fix it through a new pull request, then move the tag:
   `git tag -d vx.y.z && git push origin :refs/tags/vx.y.z`, tag the new merge commit
   and push again. Only do this while no GitHub Release or crates.io version exists for it.
