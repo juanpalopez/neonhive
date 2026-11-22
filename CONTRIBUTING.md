@@ -166,6 +166,8 @@ Open an issue with your OS, terminal, neonhive version (`neonhive --version`), t
 Claude Code version if the bug is about a session, and a `--snapshot` frame if it is
 visual. Remove anything private from snapshots before posting.
 
+AI coding agents: [AGENTS.md](AGENTS.md) holds the rules for them (Claude Code reads it through `CLAUDE.md`).
+
 ## Conduct
 
 This project follows the [Contributor Covenant](CODE_OF_CONDUCT.md).

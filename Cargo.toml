@@ -10,7 +10,7 @@ repository = "https://github.com/juanpalopez/neonhive"
 homepage = "https://github.com/juanpalopez/neonhive"
 keywords = ["tui", "agents", "claude", "visualization", "ratatui"]
 categories = ["command-line-utilities", "visualization", "development-tools"]
-exclude = ["docs/demo.svg", "docs/RELEASING.md", ".github", "scripts"]
+exclude = ["docs/demo.svg", "docs/RELEASING.md", ".github", "scripts", "AGENTS.md", "CLAUDE.md"]
 
 [dependencies]
 anyhow = "1"
