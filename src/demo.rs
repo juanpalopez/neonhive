@@ -1,7 +1,7 @@
 //! Synthetic source: an endless, scripted agent swarm. Needs no agent tool
 //! installed, so it doubles as a showcase and as a second `Source` adapter.
 
-use crate::event::{Event, Kind, Source, ROOT};
+use crate::event::{Event, Kind, Source, Tokens, ROOT};
 use crate::util::{hash, now_ms};
 
 const TYPES: [&str; 6] = [
@@ -85,6 +85,7 @@ impl DemoSource {
         if let Some(i) = self.live.iter().position(|l| l.until <= ts) {
             let done = self.live.remove(i);
             let ok = self.rand(8) != 0;
+            // Not every scripted agent emits usage; this total covers those.
             let tokens = Some(8_000 + self.rand(90_000) as u64);
             return Kind::Finish {
                 id: done.id,
@@ -130,7 +131,12 @@ impl DemoSource {
             },
             4..=7 => Kind::Usage {
                 agent,
-                tokens: 400 + self.rand(3_000) as u64,
+                tokens: Tokens {
+                    input: 40 + self.rand(300) as u64,
+                    output: 300 + self.rand(2_000) as u64,
+                    cache_read: 20_000 + self.rand(60_000) as u64,
+                    cache_write: self.rand(4_000) as u64,
+                },
                 model: "demo-model".into(),
             },
             8 => Kind::Tool {

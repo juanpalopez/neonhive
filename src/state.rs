@@ -1,6 +1,6 @@
 //! World state: a reducer over the normalized event stream.
 
-use crate::event::{Event, Kind, ROOT};
+use crate::event::{Event, Kind, Tokens, ROOT};
 use crate::util::clean;
 use std::collections::{HashMap, VecDeque};
 
@@ -25,7 +25,13 @@ pub struct Agent {
     pub spawned_ts: i64,
     pub finished_ts: Option<i64>,
     pub last_ts: i64,
-    pub tokens: u64,
+    /// Sum of this agent's `Usage` events.
+    pub tokens: Tokens,
+    /// The same, split by model. An agent can change model mid-session.
+    pub by_model: Vec<(String, Tokens)>,
+    /// Total reported when the agent finished; a fallback for agents whose
+    /// own usage was never seen.
+    pub reported_tokens: Option<u64>,
     pub tools: u32,
     pub errors: u32,
     pub prompt: String,
@@ -34,6 +40,16 @@ pub struct Agent {
     pub recent_tools: VecDeque<String>,
     /// Spawn order; keeps the layout stable.
     pub order: usize,
+}
+
+impl Agent {
+    /// The token count to show for this agent. See [`Tokens::fresh`].
+    pub fn shown_tokens(&self) -> u64 {
+        match self.tokens.fresh() {
+            0 => self.reported_tokens.unwrap_or(0),
+            n => n,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -107,7 +123,7 @@ impl World {
     }
 
     pub fn total_tokens(&self) -> u64 {
-        self.agents.values().map(|a| a.tokens).sum()
+        self.agents.values().map(Agent::shown_tokens).sum()
     }
 
     pub fn running(&self) -> usize {
@@ -132,7 +148,9 @@ impl World {
                     spawned_ts: ts,
                     finished_ts: None,
                     last_ts: ts,
-                    tokens: 0,
+                    tokens: Tokens::default(),
+                    by_model: Vec::new(),
+                    reported_tokens: None,
                     tools: 0,
                     errors: 0,
                     prompt: String::new(),
@@ -225,9 +243,7 @@ impl World {
                 }
                 a.status = if *ok { Status::Done } else { Status::Failed };
                 a.finished_ts = Some(ts);
-                if let Some(t) = tokens.filter(|t| *t > 0) {
-                    a.tokens = t;
-                }
+                a.reported_tokens = tokens.filter(|t| *t > 0);
                 let parent = a.parent.clone().unwrap_or_else(|| ROOT.to_string());
                 let (kind, pk, text) = if *ok {
                     (
@@ -304,7 +320,11 @@ impl World {
                 model,
             } => {
                 let a = self.touch(agent, ts);
-                a.tokens += tokens;
+                a.tokens.add(tokens);
+                match a.by_model.iter_mut().find(|(m, _)| m == model) {
+                    Some((_, t)) => t.add(tokens),
+                    None => a.by_model.push((model.clone(), *tokens)),
+                }
                 if !model.is_empty() {
                     a.model = model.clone();
                 }
@@ -352,6 +372,52 @@ mod tests {
         }
     }
 
+    fn usage(agent: &str, model: &str, input: u64, cache_read: u64) -> Kind {
+        Kind::Usage {
+            agent: agent.into(),
+            tokens: Tokens {
+                input,
+                cache_read,
+                ..Tokens::default()
+            },
+            model: model.into(),
+        }
+    }
+
+    #[test]
+    fn usage_adds_up_per_agent_and_per_model() {
+        let mut w = World::new("proj");
+        w.apply(&ev(10, spawn("a1", ROOT)), true);
+        w.apply(&ev(11, usage("a1", "big", 100, 1_000)), true);
+        w.apply(&ev(12, usage("a1", "small", 10, 0)), true);
+        w.apply(&ev(13, usage("a1", "big", 5, 2_000)), true);
+        let a = &w.agents["a1"];
+        assert_eq!((a.tokens.input, a.tokens.cache_read), (115, 3_000));
+        // Cache reads are not part of the headline number.
+        assert_eq!(a.shown_tokens(), 115);
+        let per: Vec<_> = a
+            .by_model
+            .iter()
+            .map(|(m, t)| (m.as_str(), t.input))
+            .collect();
+        assert_eq!(per, vec![("big", 105), ("small", 10)]);
+        assert_eq!(a.model, "big"); // the most recent one
+    }
+
+    #[test]
+    fn own_usage_wins_over_the_total_reported_on_finish() {
+        let mut w = World::new("proj");
+        w.apply(&ev(10, spawn("a1", ROOT)), true);
+        w.apply(&ev(11, usage("a1", "big", 100, 0)), true);
+        let finish = Kind::Finish {
+            id: "a1".into(),
+            ok: true,
+            tokens: Some(9_999),
+        };
+        w.apply(&ev(12, finish), true);
+        assert_eq!(w.agents["a1"].shown_tokens(), 100);
+    }
+
     #[test]
     fn spawn_work_finish() {
         let mut w = World::new("proj");
@@ -370,7 +436,10 @@ mod tests {
         );
         let a = &w.agents["a1"];
         assert_eq!(a.status, Status::Done);
-        assert_eq!((a.tools, a.tokens, a.finished_ts), (1, 500, Some(30)));
+        assert_eq!(
+            (a.tools, a.shown_tokens(), a.finished_ts),
+            (1, 500, Some(30))
+        );
         assert_eq!(a.parent.as_deref(), Some(ROOT));
         assert_eq!(w.total_tools, 1);
         // spawn packet, tool flash, result packet
