@@ -33,6 +33,7 @@ neonhive --demo
 - **Message flow.** Coloured packets travel along edges: magenta for a spawn, green for a returned result, yellow for a message between agents, red for a failure.
 - **Replay.** Open any past session and watch it again at 1x to 128x. Dead time is skipped, so a three-hour session takes minutes.
 - **Inspector.** Select an agent to see its prompt, model, token count, tool calls, errors and last output.
+- **Cost estimates.** Estimated cost per agent, per agent type and for the whole session, and how much of it the subagents spent. See [Cost estimates](#cost-estimates).
 - **Event stream.** A running log of spawns, tool calls, messages and results, coloured by agent.
 - **Scales to big sessions.** Hundreds of subagents stay readable: active agents hold the screen, finished ones dissolve into an archive counter.
 - **Session reports.** `neonhive report` prints a Markdown or JSON summary of a session: tokens by kind, an agent table, most used tools and failures. Paste it into a pull request or feed it to a script.
@@ -140,6 +141,7 @@ recorded a result for it.
 | --- | --- |
 | `↑` `↓` or `j` `k` | Select an agent |
 | `f` | Follow the most recently active agent |
+| `c` | Switch the roster between agents and cost by agent type |
 | `space` | Pause or resume a replay |
 | `+` `-` | Replay speed |
 | `r` | Replay the session from its start |
@@ -147,6 +149,38 @@ recorded a result for it.
 | `?` | Help |
 | `esc` | Back to the session list |
 | `q` | Quit |
+
+### Cost estimates
+
+The header shows `COST ~$1.24` next to the token count, the inspector shows the
+selected agent's cost, and the main agent's inspector shows what its subagents spent
+and their share of the session. Press `c` for cost by agent type.
+
+These are **estimates**, marked with `~`. They multiply the token counts in the
+transcript by list prices built into neonhive (taken 2026-11-22 from Anthropic's
+pricing page). They do not know about discounts, batch or fast mode, data residency
+or long-context tiers. The transcript does not say whether a cache write used the
+5-minute or 1-hour cache, so all writes are priced at the 5-minute rate. An agent
+whose model has no known price shows tokens only and a dash for cost; a trailing `+`
+on a total means some agents could not be priced.
+
+To use your own prices, pass a JSON file of model-id prefixes and USD per million
+tokens. Entries replace or extend the built-in table. A key matches every model id
+that starts with it, also behind a provider prefix such as `us.anthropic.`, and the
+longest matching key wins, whether it is yours or built in:
+
+```sh
+neonhive --latest --prices prices.json
+```
+
+```json
+{
+  "claude-sonnet-4-5": { "input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 6.0 },
+  "my-local-model":    { "input": 0,   "output": 0,    "cache_read": 0,   "cache_write": 0 }
+}
+```
+
+neonhive never fetches prices from the network.
 
 ### Screenshots without a terminal
 

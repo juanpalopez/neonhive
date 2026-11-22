@@ -64,6 +64,8 @@ pub struct App {
     pub box_w: u16,
     pub hidden: usize,
     pub help: bool,
+    /// The roster panel shows cost by agent type instead of agents.
+    pub cost_view: bool,
 }
 
 impl App {
@@ -93,6 +95,7 @@ impl App {
             box_w: 24,
             hidden: 0,
             help: false,
+            cost_view: false,
         };
         if mode == Mode::Live {
             app.jump_to_end();

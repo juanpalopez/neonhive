@@ -4,7 +4,7 @@ use crate::app::{App, Mode, Space, BORN_SECS, DYING_SECS};
 use crate::event::ROOT;
 use crate::fx::{self, Rgb};
 use crate::state::{Agent, LogKind, PacketKind, Status, World};
-use crate::util::{clean, fmt_clock, fmt_dur, fmt_tokens, hash};
+use crate::util::{clean, fmt_clock, fmt_dur, fmt_tokens, fmt_usd, hash};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -89,7 +89,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_graph(buf, body, app);
     }
     draw_log(buf, log, app);
-    let keys = " ↑↓ select  f follow  space pause  +/- speed  r replay  l live  ? help  esc sessions  q quit";
+    let keys = " ↑↓ select  f follow  c cost  space pause  +/- speed  r replay  l live  ? help  esc sessions  q quit";
     buf.set_stringn(footer.x, footer.y, keys, footer.width as usize, fg(fx::DIM));
     if app.help {
         draw_help(buf, area);
@@ -130,6 +130,7 @@ fn draw_header(buf: &mut Buffer, area: Rect, app: &App) {
     ));
     spans.extend(stat("TOOLS", w.total_tools.to_string()));
     spans.extend(stat("TOK", fmt_tokens(w.total_tokens())));
+    spans.extend(stat("COST", session_cost(w)));
     spans.extend(stat("MSG", w.total_msgs.to_string()));
     spans.push(Span::styled(
         format!("  {} ", fmt_clock(w.now_ts)),
@@ -601,6 +602,12 @@ fn draw_inspector(buf: &mut Buffer, area: Rect, app: &App) {
                 fmt_tokens(a.tokens.cache_read)
             ),
         ),
+        kv("COST", a.cost().map_or_else(|| "—".to_string(), fmt_usd)),
+    ];
+    if a.id == ROOT {
+        lines.push(kv("SUBS", subagent_share(w)));
+    }
+    lines.extend([
         rule("PROMPT"),
         Line::from(Span::styled(clean(&a.prompt, 150), fg(fx::TEXT.scale(0.8)))),
         rule("LAST OUTPUT"),
@@ -609,7 +616,7 @@ fn draw_inspector(buf: &mut Buffer, area: Rect, app: &App) {
             fg(fx::TEXT.scale(0.8)),
         )),
         rule("TOOLS"),
-    ];
+    ]);
     for t in a.recent_tools.iter().rev() {
         lines.push(Line::from(vec![
             Span::styled("▸ ", fg(fx::CYAN)),
@@ -626,6 +633,10 @@ fn draw_inspector(buf: &mut Buffer, area: Rect, app: &App) {
 }
 
 fn draw_roster(buf: &mut Buffer, area: Rect, app: &App) {
+    if app.cost_view {
+        draw_cost_by_type(buf, area, app);
+        return;
+    }
     let follow = if app.follow {
         " ROSTER · follow "
     } else {
@@ -662,6 +673,69 @@ fn draw_roster(buf: &mut Buffer, area: Rect, app: &App) {
                 },
             ),
         ]);
+        line.render(Rect::new(inner.x, y, inner.width, 1), buf);
+    }
+}
+
+/// Header figure: the priced total, `+` when some agents could not be priced,
+/// a dash when none could.
+fn session_cost(w: &World) -> String {
+    let s = w.cost_summary();
+    match (s.total() > 0.0, s.unpriced > 0) {
+        (false, true) => "—".to_string(),
+        (true, true) => format!("{}+", fmt_usd(s.total())),
+        _ => fmt_usd(s.total()),
+    }
+}
+
+fn subagent_share(w: &World) -> String {
+    let s = w.cost_summary();
+    match s.subagent_share() {
+        // Same marker as the header: some agents could not be priced.
+        Some(p) if s.unpriced > 0 => {
+            format!("{}+  {:.0}% of priced", fmt_usd(s.subagents), p * 100.0)
+        }
+        Some(p) => format!("{}  {:.0}% of session", fmt_usd(s.subagents), p * 100.0),
+        None => "—".to_string(),
+    }
+}
+
+fn draw_cost_by_type(buf: &mut Buffer, area: Rect, app: &App) {
+    let block = panel(" COST BY TYPE ");
+    let inner = block.inner(area);
+    block.render(area, buf);
+    let rows = inner.height as usize;
+    if rows == 0 {
+        return;
+    }
+    // Columns: type, agent count, tokens, cost.
+    let name_w = (inner.width as usize).saturating_sub(23).max(4);
+    let header = format!("{:<name_w$} {:>3} {:>7} {:>9}", "TYPE", "N", "TOK", "COST");
+    Line::from(Span::styled(header, fg(fx::DIM)))
+        .render(Rect::new(inner.x, inner.y, inner.width, 1), buf);
+    for (i, r) in app.world.cost_by_type().iter().take(rows - 1).enumerate() {
+        let color = if r.agent_type == "main" {
+            fx::CYAN
+        } else {
+            fx::type_color(&r.agent_type)
+        };
+        let cost = match (r.usd > 0.0, r.unpriced > 0) {
+            (false, true) => "—".to_string(),
+            (true, true) => format!("{}+", fmt_usd(r.usd)),
+            _ => fmt_usd(r.usd),
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                format!("{:<name_w$} ", clean(&r.agent_type, name_w)),
+                fg(color.scale(0.85)),
+            ),
+            Span::styled(
+                format!("{:>3} {:>7} ", r.agents, fmt_tokens(r.tokens)),
+                fg(fx::TEXT.scale(0.8)),
+            ),
+            Span::styled(format!("{cost:>9}"), bold(fx::TEXT)),
+        ]);
+        let y = inner.y + 1 + i as u16;
         line.render(Rect::new(inner.x, y, inner.width, 1), buf);
     }
 }
@@ -706,6 +780,7 @@ fn draw_help(buf: &mut Buffer, area: Rect) {
     let lines = [
         "↑ ↓ / j k    select agent",
         "f            follow most recent activity",
+        "c            roster: cost by agent type",
         "space        pause or resume replay",
         "+ / -        replay speed",
         "r            replay session from start",
@@ -786,8 +861,26 @@ mod tests {
             for h in (1..70).step_by(3) {
                 frame(&mut app, w, h);
                 app.tick(1.0 / 30.0);
+                app.cost_view = !app.cost_view;
             }
         }
+    }
+
+    #[test]
+    fn shows_cost_in_header_and_cost_by_type_view() {
+        let mut app = busy_app();
+        frame(&mut app, 140, 40);
+        let text = frame(&mut app, 140, 40);
+        assert!(text.contains("COST ~$"), "header cost missing");
+        app.cost_view = true;
+        let text = frame(&mut app, 140, 40);
+        assert!(text.contains("COST BY TYPE"));
+        assert!(!text.contains(" ROSTER "));
+        // The main agent's inspector shows what its subagents spent.
+        app.follow = false;
+        app.selected = 0;
+        let text = frame(&mut app, 140, 40);
+        assert!(text.contains("% of session"), "subagent share missing");
     }
 
     #[test]
