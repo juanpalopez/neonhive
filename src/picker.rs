@@ -109,7 +109,7 @@ pub fn pick(
             KeyCode::Char('q') | KeyCode::Esc => return Ok(None),
             KeyCode::Up | KeyCode::Char('k') => selected = selected.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
-                selected = (selected + 1).min(sessions.len().saturating_sub(1))
+                selected = (selected + 1).min(sessions.len().saturating_sub(1));
             }
             KeyCode::PageUp => selected = selected.saturating_sub(10),
             KeyCode::PageDown => selected = (selected + 10).min(sessions.len().saturating_sub(1)),

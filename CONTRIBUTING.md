@@ -24,6 +24,44 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
+Lint levels are set in the `[lints]` table of `Cargo.toml`, so `cargo clippy` on
+your machine reports the same things as CI.
+
+## Pull request titles
+
+Pull requests are squash-merged, and the title becomes the commit message on
+`main`. Titles follow [Conventional Commits](https://www.conventionalcommits.org/),
+and CI checks them:
+
+```
+<type>(<optional scope>): <subject>
+```
+
+| Type | Use for |
+| --- | --- |
+| `feat` | A new feature |
+| `fix` | A bug fix |
+| `docs` | Documentation only |
+| `refactor` | Code change that neither fixes a bug nor adds a feature |
+| `perf` | Performance improvement |
+| `test` | Tests only |
+| `build` | Dependencies, packaging |
+| `ci` | CI configuration |
+| `style` | Formatting, no code change |
+| `chore` | Maintenance |
+| `revert` | Reverting a commit |
+
+The subject starts lower-case and has no final period. Add `!` after the type for
+a breaking change. Examples:
+
+```
+feat(ui): add timeline bar to replay
+fix(claude): count usage once per response
+feat!: rename --latest to --last
+```
+
+Commits inside the pull request can be titled however you like.
+
 ## Looking at your change
 
 You cannot attach a terminal to a pull request, but you can attach a frame:

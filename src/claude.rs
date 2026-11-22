@@ -274,7 +274,7 @@ impl Tailer {
                         "tool_result" if block["is_error"].as_bool() == Some(true) => {
                             push(Kind::ToolError {
                                 agent: agent.clone(),
-                            })
+                            });
                         }
                         _ => {}
                     }
