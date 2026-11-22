@@ -189,11 +189,26 @@ impl Tailer {
                 let msg = &v["message"];
                 let id = msg["id"].as_str().unwrap_or("");
                 let n = |key: &str| msg["usage"][key].as_u64().unwrap_or(0);
+                // `cache_creation` splits the combined write count by cache
+                // lifetime. Older transcripts lack it: then every write is
+                // counted as 5-minute (see `Tokens::split_cache_write`).
+                let cc = &msg["usage"]["cache_creation"];
+                let split = (cc["ephemeral_5m_input_tokens"].is_u64()
+                    || cc["ephemeral_1h_input_tokens"].is_u64())
+                .then(|| {
+                    (
+                        cc["ephemeral_5m_input_tokens"].as_u64().unwrap_or(0),
+                        cc["ephemeral_1h_input_tokens"].as_u64().unwrap_or(0),
+                    )
+                });
+                let (cache_write_5m, cache_write_1h) =
+                    Tokens::split_cache_write(n("cache_creation_input_tokens"), split);
                 let total = Tokens {
                     input: n("input_tokens"),
                     output: n("output_tokens"),
                     cache_read: n("cache_read_input_tokens"),
-                    cache_write: n("cache_creation_input_tokens"),
+                    cache_write_5m,
+                    cache_write_1h,
                 };
                 // One API message spans several lines, each repeating its
                 // usage (the output count can grow); emit only what is new.
@@ -718,9 +733,86 @@ mod tests {
             input: 10,
             output: 5,
             cache_read: 100,
-            cache_write: 20,
+            cache_write_5m: 20,
+            cache_write_1h: 0,
         };
         assert_eq!(got, Some((want, "m1")));
+    }
+
+    fn usage_line(sec: u32, id: &str, usage: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","timestamp":"{T}{sec:02}.000Z","message":{{"id":"{id}","model":"m1","usage":{usage},"content":[]}}}}
+"#
+        )
+    }
+
+    fn first_usage(s: &Scratch) -> Tokens {
+        ClaudeSource::open(&s.main())
+            .poll()
+            .iter()
+            .find_map(|e| match &e.kind {
+                Kind::Usage { tokens, .. } => Some(*tokens),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    const SPLIT: &str = r#"{"cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20}}"#;
+
+    #[test]
+    fn cache_writes_are_split_by_lifetime() {
+        let s = Scratch::new("cache-split");
+        s.append("s1.jsonl", &usage_line(1, "a", SPLIT));
+        let t = first_usage(&s);
+        assert_eq!((t.cache_write_5m, t.cache_write_1h), (10, 20));
+        assert_eq!(t.fresh(), 30);
+    }
+
+    #[test]
+    fn a_disagreeing_split_defers_to_the_combined_count() {
+        // Parts below the total: the rest is 5-minute.
+        assert_eq!(Tokens::split_cache_write(30, Some((5, 20))), (10, 20));
+        // Parts above the total: capped, never more than the combined count.
+        assert_eq!(Tokens::split_cache_write(30, Some((50, 90))), (0, 30));
+        assert_eq!(Tokens::split_cache_write(0, Some((5, 5))), (0, 0));
+        // No split: all 5-minute.
+        assert_eq!(Tokens::split_cache_write(30, None), (30, 0));
+        assert_eq!(
+            Tokens::split_cache_write(u64::MAX, Some((0, u64::MAX))),
+            (0, u64::MAX)
+        );
+    }
+
+    #[test]
+    fn a_usage_line_without_the_split_counts_as_five_minute() {
+        let s = Scratch::new("cache-nosplit");
+        s.append(
+            "s1.jsonl",
+            &usage_line(1, "a", r#"{"cache_creation_input_tokens":30}"#),
+        );
+        let t = first_usage(&s);
+        assert_eq!((t.cache_write_5m, t.cache_write_1h), (30, 0));
+    }
+
+    #[test]
+    fn the_one_hour_part_is_deduplicated_per_message_id() {
+        let s = Scratch::new("cache-dedup");
+        // Same id twice, then again with more 1-hour tokens: only the growth counts.
+        let more = r#"{"cache_creation_input_tokens":40,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":30}}"#;
+        let text = [
+            usage_line(1, "a", SPLIT),
+            usage_line(2, "a", SPLIT),
+            usage_line(3, "a", more),
+        ]
+        .concat();
+        s.append("s1.jsonl", &text);
+        let mut sum = Tokens::default();
+        for e in ClaudeSource::open(&s.main()).poll() {
+            if let Kind::Usage { tokens, .. } = &e.kind {
+                sum.add(tokens);
+            }
+        }
+        assert_eq!((sum.cache_write_5m, sum.cache_write_1h), (10, 30));
     }
 
     #[test]

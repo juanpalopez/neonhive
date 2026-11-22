@@ -1,0 +1,15 @@
+# Deliberately broken workflow, used only by scripts/lint-workflows.sh to prove
+# that actionlint really runs and reports findings. It lives outside
+# .github/workflows so GitHub never runs it and the real lint never sees it.
+name: Bad fixture
+
+on:
+  pull_request:
+
+jobs:
+  bad:
+    runs-on: ubuntu-latest
+    steps:
+      - id: real
+        run: echo "${{ github.event.pull_request.title }}"
+      - run: echo "${{ steps.nosuchstep.outputs.value }}"

@@ -19,7 +19,7 @@ Everything the UI can show is one of eight events:
 | `Message { from, to, summary }` | One agent sent a message to another |
 | `Tool { agent, tool, detail }` | An agent called a tool |
 | `ToolError { agent }` | A tool call failed |
-| `Usage { agent, tokens, model }` | Tokens used by one model response, split into input, output, cache read and cache write |
+| `Usage { agent, tokens, model }` | Tokens used by one model response, split into input, output, cache read and cache write (5-minute and 1-hour kept apart) |
 | `Text { agent, text }` | An agent wrote text |
 | `Prompt { agent, text }` | An agent received its prompt |
 
@@ -59,6 +59,7 @@ How lines become events:
 - A background subagent finishes with a task notification in its parent's transcript, written as an attachment, as a queue operation, as a user turn that is the notification, or several of these at once; a foreground subagent finishes with a tool result. All become `Finish`. A notification only counts when it opens the text, so one quoted inside a file or command output does not.
 - Every `Tool` event carries a `key`: a stable 64-bit hash of the tool name and the full input JSON. The display `detail` is lossy (a basename, a truncated command), so health compares keys, never details.
 - Token usage is repeated on every line of a multi-line model response, so it is counted once per response id.
+- Cache writes come as a combined count plus an optional 5-minute / 1-hour split (`cache_creation`). Both parts are deduplicated per response id like the rest. A line with no split counts as 5-minute; when the parts disagree with the combined count, the combined count wins and the 1-hour part is capped at it (`Tokens::split_cache_write`).
 - The token count shown for an agent is input + output + cache writes. Cache reads are tracked but left out of that number: a session re-reads the same cached context on every turn, so adding reads would count it once per turn. The inspector shows all four.
 
 This format is not a published contract. The adapter treats every field as

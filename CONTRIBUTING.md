@@ -27,6 +27,10 @@ cargo test
 Lint levels are set in the `[lints]` table of `Cargo.toml`, so `cargo clippy` on
 your machine reports the same things as CI.
 
+If you change a workflow or a script, also run `scripts/lint-workflows.sh`. It runs
+`actionlint` and `shellcheck`, which you install first (`brew install actionlint shellcheck`).
+CI also checks that the crate still builds on the Rust version in `rust-version` (the `msrv` job).
+
 ## Pull request titles
 
 Pull requests are squash-merged, and the title becomes the commit message on
@@ -149,6 +153,7 @@ and after your change. For visual changes, please include a before and after.
 | `src/picker.rs` | Session list screen |
 | `src/svg.rs` | SVG export |
 | `src/report.rs` | `neonhive report`: Markdown and JSON summary of a `World` |
+| `src/watch.rs` | `neonhive watch`: alert logic (`Watcher`), pure and clock-free |
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) explains how they fit together and how to add an adapter for another agent tool.
 

@@ -12,11 +12,33 @@ pub struct Tokens {
     pub output: u64,
     /// Input tokens read from the prompt cache.
     pub cache_read: u64,
-    /// Input tokens written to the prompt cache.
-    pub cache_write: u64,
+    /// Input tokens written to the 5-minute prompt cache (1.25x input price).
+    /// A usage record without a 5m/1h split lands here in full.
+    pub cache_write_5m: u64,
+    /// Input tokens written to the 1-hour prompt cache (2x input price).
+    pub cache_write_1h: u64,
 }
 
 impl Tokens {
+    /// All cache writes, whichever cache lifetime they used.
+    pub fn cache_write(&self) -> u64 {
+        self.cache_write_5m.saturating_add(self.cache_write_1h)
+    }
+
+    /// Split a combined cache-write count into its 5-minute and 1-hour parts.
+    ///
+    /// `combined` is `cache_creation_input_tokens`; `split` is the optional
+    /// `(ephemeral_5m, ephemeral_1h)` pair. The combined number is the one
+    /// the headline count has always used, so it wins when the parts
+    /// disagree: the 1-hour part is kept (capped at `combined`) and the
+    /// 5-minute part is the remainder. With no split, everything is
+    /// 5-minute. When the parts sum to `combined` nothing changes. Never
+    /// panics and the two results never sum to more than `combined`.
+    pub fn split_cache_write(combined: u64, split: Option<(u64, u64)>) -> (u64, u64) {
+        let one_hour = split.map_or(0, |(_, h)| h).min(combined);
+        (combined - one_hour, one_hour)
+    }
+
     /// Tokens the model processed for the first time: everything except cache
     /// reads. A long session reads the same cached context on every turn, so
     /// including reads would count that context once per turn.
@@ -24,7 +46,8 @@ impl Tokens {
         // Saturating: counts come from files and a corrupt one must not panic.
         self.input
             .saturating_add(self.output)
-            .saturating_add(self.cache_write)
+            .saturating_add(self.cache_write_5m)
+            .saturating_add(self.cache_write_1h)
     }
 
     pub fn is_zero(&self) -> bool {
@@ -35,7 +58,8 @@ impl Tokens {
         self.input = self.input.saturating_add(o.input);
         self.output = self.output.saturating_add(o.output);
         self.cache_read = self.cache_read.saturating_add(o.cache_read);
-        self.cache_write = self.cache_write.saturating_add(o.cache_write);
+        self.cache_write_5m = self.cache_write_5m.saturating_add(o.cache_write_5m);
+        self.cache_write_1h = self.cache_write_1h.saturating_add(o.cache_write_1h);
     }
 
     /// Field-wise `self - o`, never below zero.
@@ -44,7 +68,8 @@ impl Tokens {
             input: self.input.saturating_sub(o.input),
             output: self.output.saturating_sub(o.output),
             cache_read: self.cache_read.saturating_sub(o.cache_read),
-            cache_write: self.cache_write.saturating_sub(o.cache_write),
+            cache_write_5m: self.cache_write_5m.saturating_sub(o.cache_write_5m),
+            cache_write_1h: self.cache_write_1h.saturating_sub(o.cache_write_1h),
         }
     }
 }
