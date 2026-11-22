@@ -5,7 +5,7 @@
 //! new lines. The transcript format is not a documented contract, so parsing
 //! is tolerant: unknown lines and fields are skipped.
 
-use crate::event::{Event, Kind, Source, ROOT};
+use crate::event::{Event, Kind, Source, Tokens, ROOT};
 use crate::util::{clean, parse_ts};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -120,8 +120,8 @@ struct Tailer {
     first_ts: Option<i64>,
     last_ts: i64,
     announced: bool,
-    msg_id: String,
-    msg_counted: u64,
+    /// Usage already emitted, per API message id.
+    counted: HashMap<String, Tokens>,
 }
 
 impl Tailer {
@@ -134,8 +134,7 @@ impl Tailer {
             first_ts: None,
             last_ts: 0,
             announced: false,
-            msg_id: String::new(),
-            msg_counted: 0,
+            counted: HashMap::new(),
         }
     }
 
@@ -189,20 +188,31 @@ impl Tailer {
             "assistant" => {
                 let msg = &v["message"];
                 let id = msg["id"].as_str().unwrap_or("");
-                let total = msg["usage"]["input_tokens"].as_u64().unwrap_or(0)
-                    + msg["usage"]["output_tokens"].as_u64().unwrap_or(0);
-                // One API message spans several lines; count its usage once.
-                if id != self.msg_id {
-                    self.msg_id = id.to_string();
-                    self.msg_counted = 0;
-                }
-                if total > self.msg_counted {
+                let n = |key: &str| msg["usage"][key].as_u64().unwrap_or(0);
+                let total = Tokens {
+                    input: n("input_tokens"),
+                    output: n("output_tokens"),
+                    cache_read: n("cache_read_input_tokens"),
+                    cache_write: n("cache_creation_input_tokens"),
+                };
+                // One API message spans several lines, each repeating its
+                // usage (the output count can grow); emit only what is new.
+                // A line without an id cannot be matched to earlier lines, so
+                // it counts in full.
+                let new = if id.is_empty() {
+                    total
+                } else {
+                    let counted = self.counted.entry(id.to_string()).or_default();
+                    let new = total.minus(counted);
+                    counted.add(&new);
+                    new
+                };
+                if !new.is_zero() {
                     push(Kind::Usage {
                         agent: agent.clone(),
-                        tokens: total - self.msg_counted,
+                        tokens: new,
                         model: msg["model"].as_str().unwrap_or("").to_string(),
                     });
-                    self.msg_counted = total;
                 }
                 for block in msg["content"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
                     match block["type"].as_str().unwrap_or("") {
@@ -471,7 +481,7 @@ mod tests {
 
     fn assistant(sec: u32, msg_id: &str, block: &str) -> String {
         format!(
-            r#"{{"type":"assistant","timestamp":"{T}{sec:02}.000Z","message":{{"id":"{msg_id}","model":"m1","usage":{{"input_tokens":10,"output_tokens":5}},"content":[{block}]}}}}"#
+            r#"{{"type":"assistant","timestamp":"{T}{sec:02}.000Z","message":{{"id":"{msg_id}","model":"m1","usage":{{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}},"content":[{block}]}}}}"#
         ) + "\n"
     }
 
@@ -511,7 +521,7 @@ mod tests {
                     detail,
                 } => format!("tool {agent} {tool} {detail}"),
                 Kind::ToolError { agent } => format!("error {agent}"),
-                Kind::Usage { agent, tokens, .. } => format!("usage {agent} {tokens}"),
+                Kind::Usage { agent, tokens, .. } => format!("usage {agent} {}", tokens.fresh()),
                 Kind::Text { agent, text } => format!("text {agent} {text}"),
                 Kind::Prompt { agent, text } => format!("prompt {agent} {text}"),
             })
@@ -550,13 +560,13 @@ mod tests {
             got,
             vec![
                 "prompt main Fix the bug",
-                "usage main 15",
+                "usage main 35",
                 "spawn aaa<main explorer",
                 "prompt aaa Map the code please",
-                "usage aaa 15",
+                "usage aaa 35",
                 "spawn bbb<aaa explorer",
                 "prompt bbb Map the code please",
-                "usage bbb 15",
+                "usage bbb 35",
                 "tool bbb Read lib.rs",
             ]
         );
@@ -571,7 +581,7 @@ mod tests {
             &assistant(1, "m1", r#"{"type":"text","text":"hello"}"#),
         );
         let mut src = ClaudeSource::open(&s.main());
-        assert_eq!(kinds(&src.poll()), vec!["usage main 15", "text main hello"]);
+        assert_eq!(kinds(&src.poll()), vec!["usage main 35", "text main hello"]);
 
         let line = assistant(
             2,
@@ -584,7 +594,7 @@ mod tests {
         s.append("s1.jsonl", tail);
         assert_eq!(
             kinds(&src.poll()),
-            vec!["usage main 15", "tool main Bash ls -la"]
+            vec!["usage main 35", "tool main Bash ls -la"]
         );
     }
 
@@ -602,6 +612,76 @@ mod tests {
         );
         let got = kinds(&ClaudeSource::open(&s.main()).poll());
         assert_eq!(got.iter().filter(|k| k.starts_with("usage")).count(), 1);
+    }
+
+    fn usage_total(events: &[Event]) -> u64 {
+        events
+            .iter()
+            .map(|e| match &e.kind {
+                Kind::Usage { tokens, .. } => tokens.fresh(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn interleaved_message_ids_are_not_counted_twice() {
+        let s = Scratch::new("usage-interleaved");
+        for id in ["m1", "m2", "m1"] {
+            s.append(
+                "s1.jsonl",
+                &assistant(1, id, r#"{"type":"text","text":"a"}"#),
+            );
+        }
+        assert_eq!(usage_total(&ClaudeSource::open(&s.main()).poll()), 70);
+    }
+
+    #[test]
+    fn messages_without_an_id_each_count() {
+        let s = Scratch::new("usage-no-id");
+        for _ in 0..2 {
+            s.append(
+                "s1.jsonl",
+                &assistant(1, "", r#"{"type":"text","text":"a"}"#),
+            );
+        }
+        assert_eq!(usage_total(&ClaudeSource::open(&s.main()).poll()), 70);
+    }
+
+    #[test]
+    fn absurd_token_counts_do_not_overflow() {
+        let s = Scratch::new("usage-overflow");
+        let line = format!(
+            r#"{{"type":"assistant","timestamp":"{T}01.000Z","message":{{"id":"x","usage":{{"input_tokens":18446744073709551615,"output_tokens":7}},"content":[]}}}}"#
+        ) + "\n";
+        s.append("s1.jsonl", &line);
+        s.append("s1.jsonl", &line.replace("\"x\"", "\"y\""));
+        let mut w = crate::state::World::new("p");
+        for e in ClaudeSource::open(&s.main()).poll() {
+            w.apply(&e, false);
+        }
+        assert_eq!(w.total_tokens(), u64::MAX);
+    }
+
+    #[test]
+    fn usage_is_split_by_token_kind() {
+        let s = Scratch::new("usage-split");
+        s.append(
+            "s1.jsonl",
+            &assistant(1, "m1", r#"{"type":"text","text":"a"}"#),
+        );
+        let events = ClaudeSource::open(&s.main()).poll();
+        let got = events.iter().find_map(|e| match &e.kind {
+            Kind::Usage { tokens, model, .. } => Some((*tokens, model.as_str())),
+            _ => None,
+        });
+        let want = Tokens {
+            input: 10,
+            output: 5,
+            cache_read: 100,
+            cache_write: 20,
+        };
+        assert_eq!(got, Some((want, "m1")));
     }
 
     #[test]
@@ -643,7 +723,7 @@ mod tests {
         let got = kinds(&ClaudeSource::open(&s.main()).poll());
         assert_eq!(
             got,
-            vec!["usage main 15", "msg main>aaa Narrow scope", "error main"]
+            vec!["usage main 35", "msg main>aaa Narrow scope", "error main"]
         );
     }
 
