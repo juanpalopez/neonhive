@@ -7,6 +7,7 @@
 
 <p align="center">
   <a href="https://github.com/juanpalopez/neonhive/actions/workflows/ci.yml"><img src="https://github.com/juanpalopez/neonhive/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/neonhive"><img src="https://img.shields.io/crates/v/neonhive.svg?color=fcee0a" alt="crates.io"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-ff2abe.svg" alt="MIT license"></a>
   <img src="https://img.shields.io/badge/built%20with-Rust%20%2B%20ratatui-00f0ff.svg" alt="Built with Rust and ratatui">
 </p>
@@ -22,7 +23,7 @@ is a pulse travelling along an edge, and every tool call scrolls past in an even
 Try it in ten seconds, no agent sessions needed:
 
 ```sh
-cargo install --git https://github.com/juanpalopez/neonhive
+cargo install neonhive
 neonhive --demo
 ```
 
@@ -42,7 +43,10 @@ neonhive --demo
 neonhive needs a [Rust toolchain](https://rustup.rs) (1.87 or newer).
 
 ```sh
-# from GitHub
+# from crates.io
+cargo install neonhive
+
+# latest from GitHub
 cargo install --git https://github.com/juanpalopez/neonhive
 
 # or from a checkout
@@ -125,7 +129,7 @@ Two things to know:
 - Zoom and pan for very wide swarms
 - Timeline scrubbing in replays
 - Themes
-- Prebuilt binaries, Homebrew and crates.io
+- Prebuilt binaries and Homebrew
 
 ## FAQ
 
