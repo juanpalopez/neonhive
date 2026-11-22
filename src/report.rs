@@ -164,7 +164,17 @@ pub fn markdown(w: &World) -> String {
             .parent
             .as_ref()
             .and_then(|p| w.agents.get(p))
-            .map_or_else(|| "-".into(), |p| esc(&name(p)));
+            // The root's name is the session title; it would repeat on every row.
+            .map_or_else(
+                || "-".into(),
+                |p| {
+                    if p.id == ROOT {
+                        ROOT.into()
+                    } else {
+                        esc(&name(p))
+                    }
+                },
+            );
         o.push_str(&format!(
             "| {indent}{} | {} | {parent} | {} | {} | {} | {} | {} |\n",
             esc(&name(a)),
@@ -363,7 +373,7 @@ mod tests {
         assert!(md.contains("| Cache read | 1000 |"));
         assert!(md.contains("| Read | 2 |"));
         // Nesting: a2 sits under a1, which sits under main.
-        assert!(md.contains("| ↳ Map code | explorer | proj | done |"));
+        assert!(md.contains("| ↳ Map code | explorer | main | done |"));
         assert!(md.contains("| · ↳ Fix it | worker | Map code | failed |"));
         assert!(md.contains("- **Fix it** (worker): failed, 1 tool error\n"));
         let at = |s: &str| md.find(s).unwrap();
