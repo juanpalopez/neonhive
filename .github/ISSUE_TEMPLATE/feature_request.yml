@@ -1,0 +1,26 @@
+name: Feature request
+description: An idea, a new adapter or a visual improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What do you want to see or do
+      description: Describe the situation, not only the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Proposed change
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Area
+      options:
+        - New agent tool adapter
+        - Graph and animation
+        - Replay and playback
+        - Panels and keys
+        - Install and packaging
+        - Other

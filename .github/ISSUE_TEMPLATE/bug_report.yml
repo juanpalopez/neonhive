@@ -1,0 +1,38 @@
+name: Bug report
+description: Something is broken or looks wrong
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: snapshot
+    attributes:
+      label: Snapshot
+      description: >
+        For visual bugs, paste the output of `neonhive <session> --snapshot 10`
+        or attach an SVG made with `--svg`. Remove anything private first.
+      render: text
+  - type: input
+    id: version
+    attributes:
+      label: neonhive version
+      description: Output of `neonhive --version`
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Agent tool and version
+      placeholder: Claude Code 2.1.x
+  - type: input
+    id: env
+    attributes:
+      label: OS and terminal
+      placeholder: macOS 15, Ghostty
+    validations:
+      required: true

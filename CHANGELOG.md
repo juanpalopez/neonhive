@@ -1,0 +1,23 @@
+# Changelog
+
+All notable changes to this project are recorded here. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
+[Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+## [0.1.0] - 2026-11-22
+
+### Added
+
+- Animated agent graph: radial layout with overlap removal, spawn and dissolve effects, packets for spawns, results, messages and failures.
+- Claude Code source adapter: reads session and subagent transcripts, follows nested subagents, tails files for live sessions.
+- Live mode and replay mode with speeds from 1x to 128x and dead-time skipping.
+- Inspector, roster and event stream panels.
+- Session list screen.
+- `--demo`: scripted synthetic swarm.
+- `--snapshot`: headless frame as text, static SVG or animated SVG.
+- 24-bit colour with a 256-colour fallback.
+
+[Unreleased]: https://github.com/juanpalopez/neonhive/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/juanpalopez/neonhive/releases/tag/v0.1.0

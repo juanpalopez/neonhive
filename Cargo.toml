@@ -1,0 +1,24 @@
+[package]
+name = "neonhive"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+description = "Cyberpunk terminal UI that visualizes Claude Code agents and subagents, live or as a replay"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/juanpalopez/neonhive"
+homepage = "https://github.com/juanpalopez/neonhive"
+keywords = ["tui", "agents", "claude", "visualization", "ratatui"]
+categories = ["command-line-utilities", "visualization", "development-tools"]
+exclude = ["docs/demo.svg", ".github"]
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+serde_json = "1"
+unicode-width = "0.2"
+
+[profile.release]
+opt-level = 3
