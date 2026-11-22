@@ -62,7 +62,7 @@ struct Args {
     size: String,
     /// JSON file of token prices (USD per million) that replace or extend the
     /// built-in table used for cost estimates.
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", global = true)]
     prices: Option<PathBuf>,
 }
 
@@ -80,11 +80,11 @@ enum Command {
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    if let Some(Command::Report { session, json }) = &args.command {
-        return report(session.as_deref(), *json);
-    }
     if let Some(file) = &args.prices {
         pricing::load(file)?;
+    }
+    if let Some(Command::Report { session, json }) = &args.command {
+        return report(session.as_deref(), *json);
     }
     let colorterm = std::env::var("COLORTERM").unwrap_or_default();
     fx::set_truecolor(
@@ -158,12 +158,19 @@ fn report(session: Option<&Path>, json: bool) -> anyhow::Result<()> {
     for ev in ClaudeSource::open(&path).poll() {
         world.apply(&ev, false);
     }
-    if json {
-        println!("{}", report::json(&world));
+    let mut text = if json {
+        report::json(&world)
     } else {
-        print!("{}", report::markdown(&world));
+        report::markdown(&world)
+    };
+    if !text.ends_with('\n') {
+        text.push('\n');
     }
-    Ok(())
+    // A reader that closes the pipe early (`| head`) is not an error.
+    match std::io::Write::write_all(&mut std::io::stdout().lock(), text.as_bytes()) {
+        Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e.into()),
+        _ => Ok(()),
+    }
 }
 
 fn demo() -> App {
