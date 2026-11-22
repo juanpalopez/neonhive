@@ -16,17 +16,21 @@ scripts/check-commit-messages.sh origin/main HEAD
 scripts/check-changelog.sh "feat: your title" origin/main HEAD
 ```
 
-Run the first three before every push. `unsafe` is forbidden (`unsafe_code = "forbid"`). Do not silence a lint to get green; fix the code, or say why in the pull request.
+Run the first three before every push, and run the whole `cargo test`, not a subset: a subset hides failures elsewhere. Quote a test count in a pull request only from that run. `unsafe` is forbidden (`unsafe_code = "forbid"`). Do not silence a lint to get green; fix the code, or say why in the pull request.
+
+Do not weaken a check to get green: no lowered limit, dropped step, or edit to `scripts/check-*.sh` or `.github/workflows` without saying why in the pull request. A human must read such a change, because those checks run from the pull request's own copy and could otherwise approve themselves. Move a finding a tool could catch into CI (a clippy lint in `[lints]`, a script in `scripts/`) rather than repeating it in review.
 
 ## Workflow
 
-- Never commit to `main`. It is protected: pull request required, checks `lint`, `test (ubuntu-latest)` and `test (macos-latest)` must pass, linear history, no force push, admins included. Work on a branch, open a pull request, squash merge.
+- Never commit to `main`. It is protected: pull request required, checks `lint`, `test (ubuntu-latest)`, `test (macos-latest)`, `conventional title`, `branch name`, `commit messages` and `changelog` must pass, linear history, no force push, admins included. Work on a branch, open a pull request, squash merge.
 - Branch name: `<type>/<short-kebab-description>`, for example `fix/usage-double-count`. Lower-case letters, digits, single hyphens. CI checks it (`branch name`).
 - Types: `feat fix docs style refactor perf test build ci chore revert`.
 - Pull request titles and every commit subject: `<type>(<optional scope>): <subject>`, `!` after the type for breaking changes. The subject starts lower-case (or a digit) and has no final period. The squash merge makes the title the commit on `main`, so the title must stand alone. Commit bodies are free-form.
 - Pull request text: fill in `.github/PULL_REQUEST_TEMPLATE.md`, in normal prose. Tick a box only for a check you ran; leave the rest unchecked and say so. State plainly what was and was not verified.
 - Planned work is tracked as GitHub issues on the roadmap project (https://github.com/users/juanpalopez/projects/5). A pull request that completes one says `Closes #N`. For anything large, open an issue first.
-- Stacked pull requests are fine; merge them bottom-up so each one targets a branch that still exists.
+- Stacked pull requests are fine; merge them bottom-up. Before merging a parent with branch deletion, retarget every child to `main` (`gh pr edit <N> --base main`) and confirm it. Reason: GitHub closes a pull request whose base branch is deleted, and a closed one cannot be reopened once its base is gone (two pull requests had to be recreated). After a squash merge of the parent, merge `origin/main` into the child and push before reading its checks. Reason: the squash rewrites the parent's commits, so the child conflicts with `main` and its old check results describe a different base.
+- Shared machine: stop only a job you started, by its task id or recorded PID; never `pkill -f` or `killall`. Reason: several agents run here and a pattern matches their processes too.
+- Subagents: work in your own worktree and do not delete or edit outside it. Do not use `git add -A` (stray untracked files exist); add paths by name. Do not merge pull requests unless the maintainer asked for it in the current session.
 - `.claude/` (worktrees, local settings) is local and ignored by git. Never commit it.
 
 ## Changelog and releases
@@ -45,6 +49,7 @@ Pipeline: transcript files -> source adapter (`Source`) -> `Event` -> `World` ->
 - Animation and health use the app or world clock (`App::tick`, `World::now_ts`), never wall time. Reason: replays and `--demo --snapshot` must give identical frames and identical flags every run.
 - Do not add a dependency without stating the reason in the pull request. The tree is small on purpose (see `[dependencies]` in `Cargo.toml`).
 - Keep `rust-version` (1.87) working; do not use newer language or std features.
+- A health or cost rule tuned on synthetic data is unproven. Replay real sessions locally and report counts, never content. Reason: the first loop detector passed its unit tests and was almost all false positives on real sessions.
 
 ## Privacy
 
@@ -74,5 +79,3 @@ Tests do not show what the screen looks like. For any change to `ui`, `app` layo
 | `src/fx.rs`, `src/util.rs` | Palette and color math; text and time helpers |
 | `scripts/` | CI checks, runnable locally (see Commands) |
 | `docs/` | `ARCHITECTURE.md`, `RELEASING.md`, `demo.svg` |
-
-`src/health.rs` arrives with pull request #23; until that merges it exists only on `feat/stuck-detection`.
