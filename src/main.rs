@@ -4,14 +4,16 @@ mod demo;
 mod event;
 mod fx;
 mod picker;
+mod report;
 mod state;
 mod svg;
 mod ui;
 mod util;
 
 use app::{App, Mode, SPEEDS};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use claude::{ClaudeSource, SessionInfo};
+use event::Source;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{self as term_event, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{DefaultTerminal, Terminal};
@@ -20,8 +22,10 @@ use std::time::{Duration, Instant};
 
 /// Watch Claude Code agents and subagents interact, live or as a replay.
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about, args_conflicts_with_subcommands = true)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     /// Session transcript (.jsonl). Without it, a session list opens.
     session: Option<PathBuf>,
     /// Open the most recent session.
@@ -56,8 +60,23 @@ struct Args {
     size: String,
 }
 
+#[derive(Subcommand)]
+enum Command {
+    /// Print a summary of a session as Markdown or JSON, without opening the UI.
+    Report {
+        /// Session transcript (.jsonl). Defaults to the most recent session.
+        session: Option<PathBuf>,
+        /// Print JSON instead of Markdown.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Some(Command::Report { session, json }) = &args.command {
+        return report(session.as_deref(), *json);
+    }
     let colorterm = std::env::var("COLORTERM").unwrap_or_default();
     fx::set_truecolor(
         args.svg.is_some()
@@ -99,6 +118,43 @@ fn open(path: &Path, info: Option<&SessionInfo>, args: &Args) -> App {
         .position(|s| *s >= args.speed)
         .unwrap_or(SPEEDS.len() - 1);
     app
+}
+
+/// Prints a session report to stdout. No UI, no animation.
+fn report(session: Option<&Path>, json: bool) -> anyhow::Result<()> {
+    let sessions = claude::sessions();
+    let (path, info) = match session {
+        Some(p) => {
+            anyhow::ensure!(p.is_file(), "no such session file: {}", p.display());
+            let p = p.canonicalize()?;
+            let info = sessions.iter().find(|s| s.path == p);
+            (p, info)
+        }
+        None => {
+            let first = sessions
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("no Claude Code sessions found"))?;
+            (first.path.clone(), Some(first))
+        }
+    };
+    let title = match info {
+        Some(s) if !s.title.is_empty() => format!("{} // {}", s.project, s.title),
+        Some(s) => s.project.clone(),
+        None => path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    let mut world = state::World::new(&title);
+    for ev in ClaudeSource::open(&path).poll() {
+        world.apply(&ev, false);
+    }
+    if json {
+        println!("{}", report::json(&world));
+    } else {
+        print!("{}", report::markdown(&world));
+    }
+    Ok(())
 }
 
 fn demo() -> App {
