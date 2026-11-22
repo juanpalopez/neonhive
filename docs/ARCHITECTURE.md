@@ -119,6 +119,7 @@ The view model. It owns:
 - **Playback.** In live mode every event is applied as it arrives. In replay mode a virtual clock advances at the chosen speed and events are applied when the clock passes them. Gaps longer than one second of wall time are skipped.
 - **Visibility.** `choose_visible` picks which agents get a node: active ones first, then the most recently active, up to a cap derived from the panel size, plus any ancestors needed to draw edges.
 - **Layout.** `layout` places nodes radially (leaves on the rim, a node with a subtree part-way out), then `separate` pushes overlapping boxes apart in cell space.
+- **Panes.** Focus, panel sizes, full size, scroll positions and the event-stream search (`Panes`). The stream scroll position is a line number (`World::log_seq` numbering), so it stays on the same line while new lines arrive and old ones are dropped. Keys are mapped to these in `main.rs` (`handle_key`), which tests drive without a terminal; `ui` only reads them and writes back what it measured.
 - **Animation.** Node positions ease toward their layout targets. New nodes start at their parent's position. Nodes that leave the visible set dissolve before removal.
 
 All animation runs on one clock that `tick(dt)` advances, never on the wall clock.
