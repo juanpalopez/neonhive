@@ -6,7 +6,7 @@
 //! is tolerant: unknown lines and fields are skipped.
 
 use crate::event::{Event, Kind, Source, Tokens, ROOT};
-use crate::util::{clean, parse_ts};
+use crate::util::{clean, parse_ts, str_hash64};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -254,6 +254,7 @@ impl Tailer {
                                     agent: agent.clone(),
                                     tool: name.to_string(),
                                     detail: tool_detail(name, input),
+                                    key: call_key(name, input),
                                 }),
                             }
                         }
@@ -350,6 +351,14 @@ fn notification(text: &str, tokens: Option<u64>) -> Option<Kind> {
         ok: status == "completed",
         tokens,
     })
+}
+
+/// Identity of a tool call for repeat detection: the tool name and its whole
+/// input. `Value`'s text form is canonical here, because serde_json keeps
+/// object keys sorted (its `preserve_order` feature is off), so two equal
+/// inputs always serialize alike.
+fn call_key(name: &str, input: &Value) -> u64 {
+    str_hash64(&[name, &input.to_string()])
 }
 
 fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
@@ -548,6 +557,7 @@ mod tests {
                     agent,
                     tool,
                     detail,
+                    ..
                 } => format!("tool {agent} {tool} {detail}"),
                 Kind::ToolError { agent } => format!("error {agent}"),
                 Kind::Usage { agent, tokens, .. } => format!("usage {agent} {}", tokens.fresh()),
@@ -784,6 +794,44 @@ mod tests {
                 "prompt main see this: <task-notification> <task-id>ddd</task-id> <status>completed</status> <summary>done</summary> </task-notification>",
             ]
         );
+    }
+
+    #[test]
+    fn call_key_covers_the_whole_input() {
+        let s = Scratch::new("call-key");
+        let long =
+            "cd /a/very/long/path/that/goes/on/and/on/and/fills/the/eighty/character/summary";
+        let calls = [
+            format!(r#"{{"command":"{long} && make a"}}"#),
+            format!(r#"{{"command":"{long} && make b"}}"#),
+            format!(r#"{{"command":"{long} && make a"}}"#),
+            r#"{"file_path":"/x/lib.rs","old_string":"a","new_string":"b"}"#.to_string(),
+            r#"{"file_path":"/x/lib.rs","old_string":"b","new_string":"c"}"#.to_string(),
+            r#"{"new_string":"b","old_string":"a","file_path":"/x/lib.rs"}"#.to_string(),
+        ];
+        for (i, input) in calls.iter().enumerate() {
+            let name = if i < 3 { "Bash" } else { "Edit" };
+            let block =
+                format!(r#"{{"type":"tool_use","id":"t{i}","name":"{name}","input":{input}}}"#);
+            s.append("s1.jsonl", &assistant(i as u32, &format!("m{i}"), &block));
+        }
+        let events = ClaudeSource::open(&s.main()).poll();
+        let tools: Vec<(&str, u64)> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                Kind::Tool { detail, key, .. } => Some((detail.as_str(), *key)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tools.len(), 6);
+        // Same display detail, different input: different calls.
+        assert_eq!(tools[0].0, tools[1].0);
+        assert_ne!(tools[0].1, tools[1].1);
+        assert_eq!(tools[3].0, tools[4].0);
+        assert_ne!(tools[3].1, tools[4].1);
+        // Same input, even with keys in another order: the same call.
+        assert_eq!(tools[0].1, tools[2].1);
+        assert_eq!(tools[3].1, tools[5].1);
     }
 
     #[test]

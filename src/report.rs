@@ -316,6 +316,7 @@ mod tests {
             agent: agent.into(),
             tool: name.into(),
             detail: "SECRET-DETAIL".into(),
+            key: 0,
         }
     }
 
