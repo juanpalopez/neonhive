@@ -271,8 +271,14 @@ impl Tailer {
                         text: clean(t, 400),
                     })
                 };
-                if let Some(kind) = content.as_str().and_then(prompt) {
-                    push(kind);
+                if let Some(text) = content.as_str() {
+                    // A background subagent's completion can also arrive as
+                    // the user turn itself.
+                    if let Some(kind) = notification(text, None) {
+                        push(kind);
+                    } else if let Some(kind) = prompt(text) {
+                        push(kind);
+                    }
                 }
                 for block in content.as_array().map(Vec::as_slice).unwrap_or(&[]) {
                     match block["type"].as_str().unwrap_or("") {
@@ -307,20 +313,43 @@ impl Tailer {
                     Some(s) => s.to_string(),
                     None => a["prompt"].to_string(),
                 };
-                if let Some(id) = tag(&text, "task-id") {
-                    let status = tag(&text, "status").unwrap_or("");
-                    if status != "running" && !status.is_empty() {
-                        push(Kind::Finish {
-                            id: id.to_string(),
-                            ok: status == "completed",
-                            tokens: a["usage"]["totalTokens"].as_u64(),
-                        });
-                    }
+                // The prompt is normally the notification text itself; when it
+                // is structured, the notification starts somewhere inside.
+                let text = text.find("<task-notification>").map_or("", |i| &text[i..]);
+                if let Some(kind) = notification(text, a["usage"]["totalTokens"].as_u64()) {
+                    push(kind);
+                }
+            }
+            "queue-operation" => {
+                // The same notification, queued for the parent's next turn.
+                // In long sessions this can be the only form that is written.
+                if let Some(kind) = v["content"].as_str().and_then(|t| notification(t, None)) {
+                    push(kind);
                 }
             }
             _ => {}
         }
     }
+}
+
+/// `Finish` from a task notification: a `<task-notification>` block with a
+/// `<task-id>` and a final `<status>`. The block must open the text (after
+/// whitespace), so a notification quoted inside a file or command output is
+/// not taken for a real one. Notifications without a status are progress
+/// events, and `running` is not final; neither finishes anything. The same
+/// notification is often written in several forms; `World` ignores a repeated
+/// `Finish`.
+fn notification(text: &str, tokens: Option<u64>) -> Option<Kind> {
+    if !text.trim_start().starts_with("<task-notification>") {
+        return None;
+    }
+    let id = tag(text, "task-id")?;
+    let status = tag(text, "status").unwrap_or("");
+    (!status.is_empty() && status != "running").then(|| Kind::Finish {
+        id: id.to_string(),
+        ok: status == "completed",
+        tokens,
+    })
 }
 
 fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
@@ -703,6 +732,57 @@ mod tests {
         assert_eq!(
             got,
             vec!["finish aaa true Some(4200)", "finish bbb false Some(4200)"]
+        );
+    }
+
+    #[test]
+    fn task_notification_as_user_turn_or_queue_operation_finishes_agent() {
+        let s = Scratch::new("notify-forms");
+        let block = |id: &str, status: &str| {
+            format!("<task-notification>\\n<task-id>{id}</task-id>\\n<status>{status}</status>\\n<summary>done</summary>\\n</task-notification>")
+        };
+        let lines = [
+            // The user turn itself is the notification.
+            format!(
+                r#"{{"type":"user","timestamp":"{T}01.000Z","message":{{"role":"user","content":"{}"}}}}"#,
+                block("aaa", "completed")
+            ),
+            // Queued for the parent, then taken off the queue: the same
+            // notification twice, which `World` ignores the second time.
+            format!(
+                r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"{T}02.000Z","content":"{}"}}"#,
+                block("bbb", "killed")
+            ),
+            format!(
+                r#"{{"type":"queue-operation","operation":"remove","timestamp":"{T}03.000Z","content":"{}"}}"#,
+                block("bbb", "killed")
+            ),
+            // Not final, or not a notification at all: no finish.
+            format!(
+                r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"{T}04.000Z","content":"<task-notification><task-id>ccc</task-id><event>line</event></task-notification>"}}"#
+            ),
+            format!(
+                r#"{{"type":"user","timestamp":"{T}05.000Z","message":{{"role":"user","content":"see this: {}"}}}}"#,
+                block("ddd", "completed")
+            ),
+            format!(
+                r#"{{"type":"queue-operation","operation":"enqueue","timestamp":"{T}06.000Z","content":"{}"}}"#,
+                block("eee", "running")
+            ),
+        ];
+        for l in &lines {
+            s.append("s1.jsonl", l);
+            s.append("s1.jsonl", "\n");
+        }
+        let got = kinds(&ClaudeSource::open(&s.main()).poll());
+        assert_eq!(
+            got,
+            vec![
+                "finish aaa true None",
+                "finish bbb false None",
+                "finish bbb false None",
+                "prompt main see this: <task-notification> <task-id>ddd</task-id> <status>completed</status> <summary>done</summary> </task-notification>",
+            ]
         );
     }
 
