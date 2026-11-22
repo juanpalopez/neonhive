@@ -92,9 +92,12 @@ ci/branch-and-commit-checks
 ```
 
 CI checks this (the `branch name` check). Bot branches (`dependabot/`, `renovate/`)
-and `release/` branches are exempt. Pull requests from a fork only get a warning,
-since a branch called `main` or `patch-1` is common there and does not reach history
-after a squash merge. To rename a branch:
+and `release/` branches are exempt.
+
+Pull requests from a fork only get a warning for branch names and commit messages:
+a branch called `main` or a commit called `Update README.md` is common there, and
+neither reaches history after a squash merge. The pull request title is always
+checked, because it becomes the commit on `main`. To rename a branch:
 
 ```sh
 git branch -m feat/new-name
