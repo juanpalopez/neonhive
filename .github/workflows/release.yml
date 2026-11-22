@@ -16,10 +16,16 @@ jobs:
   verify:
     name: verify tag
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
+      # Full history, so the script can test that the tagged commit is on main.
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
+      # Runs first: a tag on a branch commit must never reach the publish jobs.
+      - name: Check the tagged commit is on main
+        run: scripts/check-tag-on-main.sh "$GITHUB_SHA"
       - name: Check tag, Cargo.toml and CHANGELOG.md agree
         env:
           TAG: ${{ github.ref_name }}
@@ -35,6 +41,7 @@ jobs:
     name: github release
     needs: ci
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write
     steps:
@@ -63,6 +70,7 @@ jobs:
     name: publish to crates.io
     needs: ci
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
