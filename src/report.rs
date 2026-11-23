@@ -1,19 +1,37 @@
 //! Session report: a static summary of a [`World`] as Markdown or JSON.
 //!
 //! Both renderers are pure. They read only what the world keeps: labels, tool
-//! names, counts and timestamps. Prompts, messages and tool details are never
-//! included, so a report is safer to share than a transcript. It can still
-//! name files or tasks through labels, so it should be read before sharing.
+//! names, counts, timestamps, costs and health flags. Prompts, messages and
+//! tool details are never included, so a report is safer to share than a
+//! transcript. It can still name files or tasks through labels, so it should
+//! be read before sharing.
 
-use crate::event::{Tokens, ROOT};
+use crate::event::{Event, Tokens, ROOT};
+use crate::health::Health;
 use crate::state::{Agent, Status, World};
-use crate::util::{clean, fmt_date, fmt_dur, fmt_tokens};
+use crate::util::{clean, fmt_date, fmt_dur, fmt_tokens, fmt_usd};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 
 /// Version of the JSON layout. Bumped when a field is removed or changes meaning.
 const SCHEMA: u32 = 1;
 const TOP_TOOLS: usize = 10;
+/// Longest label in Markdown, to keep the agent table readable.
+const MD_LABEL: usize = 60;
+/// Longest label in JSON. The world keeps labels at this length, so JSON
+/// carries them as kept; scripts get the most it can give.
+const JSON_LABEL: usize = 80;
+
+/// Fold a whole transcript into `world`, the way `neonhive watch --once`
+/// does: every event, then one health check at the session's own clock (its
+/// last event). `Watcher::poll` with no clock does the same, so both
+/// commands flag the same agents.
+pub fn load(world: &mut World, events: &[Event]) {
+    for ev in events {
+        world.apply(ev, false);
+    }
+    world.sweep_health();
+}
 
 fn status_name(s: Status) -> &'static str {
     match s {
@@ -53,26 +71,72 @@ fn tree(w: &World) -> Vec<(&Agent, usize)> {
     out
 }
 
-fn start_ms(w: &World) -> i64 {
+/// When the session started: the earliest agent start. `None` when no event
+/// carried a time.
+fn start_ms(w: &World) -> Option<i64> {
     w.agents
         .values()
         .map(|a| a.spawned_ts)
         .filter(|t| *t > 0)
         .min()
-        .unwrap_or(0)
+}
+
+/// Measured from the session start only; never from 0.
+fn session_duration_ms(w: &World) -> Option<i64> {
+    start_ms(w).map(|s| (w.now_ts - s).max(0))
 }
 
 /// When the agent started. An agent with no activity of its own (a root whose
 /// transcript is empty) has no start time; the session start stands in.
-fn agent_start_ms(w: &World, a: &Agent) -> i64 {
+fn agent_start_ms(w: &World, a: &Agent) -> Option<i64> {
     match a.spawned_ts {
         0 => start_ms(w),
-        t => t,
+        t => Some(t),
     }
 }
 
-fn duration_ms(w: &World, a: &Agent) -> i64 {
-    (a.finished_ts.unwrap_or(w.now_ts) - agent_start_ms(w, a)).max(0)
+fn duration_ms(w: &World, a: &Agent) -> Option<i64> {
+    agent_start_ms(w, a).map(|s| (a.finished_ts.unwrap_or(w.now_ts) - s).max(0))
+}
+
+/// Session cost with the same honesty as the UI header: `usd` is `None` when
+/// nothing could be priced, and `lower_bound` is set when some agents could
+/// not be priced and are left out of `usd`.
+struct SessionCost {
+    usd: Option<f64>,
+    lower_bound: bool,
+    unpriced: usize,
+}
+
+fn session_cost(w: &World) -> SessionCost {
+    let s = w.cost_summary();
+    SessionCost {
+        usd: (s.total() > 0.0 || s.unpriced == 0).then(|| s.total()),
+        lower_bound: s.unpriced > 0,
+        unpriced: s.unpriced,
+    }
+}
+
+fn health_name(h: Health) -> &'static str {
+    match h {
+        Health::Ok => "ok",
+        Health::Looping => "looping",
+        Health::Erroring => "erroring",
+        Health::Stalled => "stalled",
+    }
+}
+
+/// Agents with a health flag, in tree order, with the flag and its reason.
+/// A reason names a tool and a count, or a silence; never tool input.
+fn flagged(w: &World) -> Vec<(&Agent, Health, String)> {
+    tree(w)
+        .into_iter()
+        .filter_map(|(a, _)| Some((a, w.health(a), w.health_reason(a)?)))
+        .collect()
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 fn total(w: &World) -> Tokens {
@@ -87,13 +151,17 @@ fn errors(w: &World) -> u64 {
     w.agents.values().map(|a| u64::from(a.errors)).sum()
 }
 
-fn name(a: &Agent) -> String {
+fn name_max(a: &Agent, max: usize) -> String {
     let n = if a.label.is_empty() {
         &a.agent_type
     } else {
         &a.label
     };
-    clean(n, 60)
+    clean(n, max)
+}
+
+fn name(a: &Agent) -> String {
+    name_max(a, MD_LABEL)
 }
 
 /// Tool names by use, most used first; ties by name so output is stable.
@@ -130,26 +198,40 @@ fn esc(s: &str) -> String {
 pub fn markdown(w: &World) -> String {
     let rows = tree(w);
     let t = total(w);
-    let start = start_ms(w);
     let mut o = String::new();
+    let dash = || "-".to_string();
 
     o.push_str(&format!(
         "# Session report: {}\n\n",
         esc(&name(&w.agents[ROOT]))
     ));
-    o.push_str(&format!("- **Started:** {}\n", fmt_date(start)));
     o.push_str(&format!(
-        "- **Duration:** {}\n",
-        fmt_dur((w.now_ts - start).max(0))
+        "- **Started:** {}\n",
+        start_ms(w).map_or_else(dash, fmt_date)
     ));
     o.push_str(&format!(
-        "- **Agents:** {} ({} subagents)\n",
+        "- **Duration:** {}\n",
+        session_duration_ms(w).map_or_else(dash, fmt_dur)
+    ));
+    o.push_str(&format!(
+        "- **Agents:** {} ({})\n",
         rows.len(),
-        rows.len().saturating_sub(1)
+        plural(rows.len().saturating_sub(1), "subagent", "subagents")
     ));
     o.push_str(&format!("- **Tool calls:** {}\n", w.total_tools));
     o.push_str(&format!("- **Tool errors:** {}\n", errors(w)));
     o.push_str(&format!("- **Tokens:** {}\n", fmt_tokens(w.total_tokens())));
+    let c = session_cost(w);
+    let unpriced = plural(c.unpriced, "agent", "agents");
+    let cost = match (c.usd, c.lower_bound) {
+        (Some(usd), false) => fmt_usd(usd),
+        (Some(usd), true) => format!(
+            "{}+ (lower bound: {unpriced} on a model with no known price)",
+            fmt_usd(usd)
+        ),
+        (None, _) => format!("- ({unpriced} on a model with no known price)"),
+    };
+    o.push_str(&format!("- **Estimated cost:** {cost}\n"));
 
     o.push_str("\n## Tokens\n\n| Kind | Count |\n| --- | ---: |\n");
     for (k, n) in [
@@ -163,8 +245,8 @@ pub fn markdown(w: &World) -> String {
     }
 
     o.push_str("\n## Agents\n\n");
-    o.push_str("| Agent | Type | Parent | Status | Duration | Tokens | Tools | Errors |\n");
-    o.push_str("| --- | --- | --- | --- | ---: | ---: | ---: | ---: |\n");
+    o.push_str("| Agent | Type | Parent | Status | Duration | Tokens | Cost | Tools | Errors |\n");
+    o.push_str("| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |\n");
     for (a, depth) in &rows {
         let indent = match depth {
             0 => String::new(),
@@ -186,12 +268,13 @@ pub fn markdown(w: &World) -> String {
                 },
             );
         o.push_str(&format!(
-            "| {indent}{} | {} | {parent} | {} | {} | {} | {} | {} |\n",
+            "| {indent}{} | {} | {parent} | {} | {} | {} | {} | {} | {} |\n",
             esc(&name(a)),
             esc(&a.agent_type),
             status_name(a.status),
-            fmt_dur(duration_ms(w, a)),
+            duration_ms(w, a).map_or_else(dash, fmt_dur),
             fmt_tokens(a.shown_tokens()),
+            a.cost().map_or_else(dash, fmt_usd),
             a.tools,
             a.errors,
         ));
@@ -229,6 +312,21 @@ pub fn markdown(w: &World) -> String {
             why.join(", ")
         ));
     }
+
+    o.push_str("\n## Health flags\n\n");
+    let flags = flagged(w);
+    if flags.is_empty() {
+        o.push_str("No agent flagged as looping, erroring or stalled.\n");
+    }
+    for (a, h, reason) in flags {
+        o.push_str(&format!(
+            "- **{}** ({}): {}, {}\n",
+            esc(&name(a)),
+            esc(&a.agent_type),
+            health_name(h),
+            esc(&reason)
+        ));
+    }
     o
 }
 
@@ -255,10 +353,12 @@ pub fn json(w: &World) -> String {
                 "parent": a.parent,
                 "depth": depth,
                 "type": a.agent_type,
-                "label": clean(&a.label, 80),
+                "label": clean(&a.label, JSON_LABEL),
                 "status": status_name(a.status),
                 "start_ms": agent_start_ms(w, a),
                 "duration_ms": duration_ms(w, a),
+                "cost_usd": a.cost(),
+                "health": health_name(w.health(a)),
                 "tokens": tokens_json(&a.tokens, a.shown_tokens()),
                 "models": a.by_model.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
                 "tool_calls": a.tools,
@@ -275,19 +375,37 @@ pub fn json(w: &World) -> String {
         .map(|a| {
             json!({
                 "id": a.id,
-                "label": clean(&a.label, 80),
+                "label": clean(&a.label, JSON_LABEL),
                 "type": a.agent_type,
                 "failed": a.status == Status::Failed,
                 "errors": a.errors,
             })
         })
         .collect();
-    let start = start_ms(w);
+    let flags: Vec<Value> = flagged(w)
+        .iter()
+        .map(|(a, h, reason)| {
+            json!({
+                "id": a.id,
+                "label": clean(&a.label, JSON_LABEL),
+                "type": a.agent_type,
+                "health": health_name(*h),
+                "reason": reason,
+            })
+        })
+        .collect();
+    let c = session_cost(w);
     let doc = json!({
         "schema": SCHEMA,
-        "title": name(&w.agents[ROOT]),
-        "start_ms": start,
-        "duration_ms": (w.now_ts - start).max(0),
+        "title": name_max(&w.agents[ROOT], JSON_LABEL),
+        "start_ms": start_ms(w),
+        "duration_ms": session_duration_ms(w),
+        "cost": {
+            "usd": c.usd,
+            "lower_bound": c.lower_bound,
+            "unpriced_agents": c.unpriced,
+        },
+        "flags": flags,
         "agent_count": rows.len(),
         "tool_calls": w.total_tools,
         "errors": errors(w),
@@ -438,8 +556,8 @@ mod tests {
         assert!(md.contains(r"one \| two three"));
         assert!(md.contains(r"mcp\|tool"));
         let row = md.lines().find(|l| l.contains("two three")).unwrap();
-        // Eight columns have nine separators; escaped pipes are not separators.
-        assert_eq!(row.replace(r"\|", "").matches('|').count(), 9, "{row}");
+        // Nine columns have ten separators; escaped pipes are not separators.
+        assert_eq!(row.replace(r"\|", "").matches('|').count(), 10, "{row}");
     }
 
     #[test]
@@ -448,7 +566,290 @@ mod tests {
         let md = markdown(&w);
         assert!(md.contains("No tool calls."));
         assert!(md.contains("No failed agents and no tool errors."));
+        assert!(md.contains("No agent flagged as looping, erroring or stalled."));
         let v: Value = serde_json::from_str(&json(&w)).unwrap();
         assert_eq!(v["agent_count"], 1);
+    }
+
+    fn prompt(ts: i64) -> Event {
+        ev(
+            ts,
+            Kind::Prompt {
+                agent: ROOT.into(),
+                text: "SECRET-PROMPT".into(),
+            },
+        )
+    }
+
+    fn usage(agent: &str, model: &str, input: u64) -> Kind {
+        Kind::Usage {
+            agent: agent.into(),
+            tokens: Tokens {
+                input,
+                ..Tokens::default()
+            },
+            model: model.into(),
+        }
+    }
+
+    #[test]
+    fn unknown_start_is_a_dash_or_null_never_1970() {
+        // Events with no time: the world clock never moves off 0.
+        let mut w = World::new("proj");
+        w.apply(&ev(0, tool(ROOT, "Read")), false);
+        let md = markdown(&w);
+        assert!(md.contains("- **Started:** -\n"), "{md}");
+        assert!(md.contains("- **Duration:** -\n"), "{md}");
+        assert!(!md.contains("1970"));
+        assert!(md.contains("| proj | main | - | running | - |"), "{md}");
+        let v: Value = serde_json::from_str(&json(&w)).unwrap();
+        assert!(v["start_ms"].is_null() && v["duration_ms"].is_null());
+        assert!(v["agents"][0]["start_ms"].is_null());
+        assert!(v["agents"][0]["duration_ms"].is_null());
+    }
+
+    #[test]
+    fn a_prompt_alone_starts_the_session() {
+        // One user line and no reply yet.
+        let mut w = World::new("proj");
+        w.apply(&prompt(1_700_000_000_000), false);
+        let v: Value = serde_json::from_str(&json(&w)).unwrap();
+        assert_eq!(v["start_ms"], 1_700_000_000_000_i64);
+        assert_eq!(v["duration_ms"], 0);
+        assert!(markdown(&w).contains("- **Duration:** 00:00\n"));
+    }
+
+    #[test]
+    fn duration_runs_from_the_first_prompt() {
+        let mut w = World::new("proj");
+        w.apply(&prompt(10_000), false);
+        w.apply(&ev(40_000, tool(ROOT, "Read")), false);
+        w.apply(&ev(70_000, tool(ROOT, "Read")), false);
+        let v: Value = serde_json::from_str(&json(&w)).unwrap();
+        assert_eq!(v["start_ms"], 10_000);
+        assert_eq!(v["duration_ms"], 60_000);
+        assert_eq!(v["agents"][0]["duration_ms"], 60_000);
+    }
+
+    #[test]
+    fn one_subagent_is_singular() {
+        let mut w = World::new("proj");
+        w.apply(&ev(1, spawn("a1", ROOT, "t", "x")), false);
+        assert!(markdown(&w).contains("- **Agents:** 2 (1 subagent)\n"));
+    }
+
+    #[test]
+    fn labels_are_cut_at_60_in_markdown_and_80_in_json() {
+        let long = "x".repeat(100);
+        let mut w = World::new("proj");
+        w.apply(&ev(1, spawn("a1", ROOT, "t", &long)), false);
+        let md = markdown(&w);
+        let cut = |n: usize| format!("{}…", "x".repeat(n - 1));
+        assert!(md.contains(&format!("| ↳ {} |", cut(MD_LABEL))), "{md}");
+        let v: Value = serde_json::from_str(&json(&w)).unwrap();
+        assert_eq!(v["agents"][1]["label"], cut(JSON_LABEL));
+    }
+
+    #[test]
+    fn cost_is_shown_per_agent_and_for_the_session() {
+        let mut w = World::new("proj");
+        w.apply(&prompt(1_000), false);
+        w.apply(&ev(1_000, spawn("a1", ROOT, "explorer", "Map")), false);
+        // $4 per million input tokens.
+        w.apply(&ev(2_000, usage(ROOT, "claude-opus-5-5", 1_000_000)), false);
+        w.apply(&ev(3_000, usage("a1", "claude-opus-5-5", 500_000)), false);
+        let md = markdown(&w);
+        assert!(md.contains("- **Estimated cost:** ~$6.00\n"), "{md}");
+        assert!(md.contains("| Cost |"));
+        assert!(md.contains("| 1.0M | ~$4.00 |"), "{md}");
+        assert!(md.contains("| 500.0k | ~$2.00 |"), "{md}");
+        let v: Value = serde_json::from_str(&json(&w)).unwrap();
+        assert_eq!(v["cost"]["usd"], 6.0);
+        assert_eq!(v["cost"]["lower_bound"], false);
+        assert_eq!(v["cost"]["unpriced_agents"], 0);
+        assert_eq!(v["agents"][0]["cost_usd"], 4.0);
+        assert_eq!(v["agents"][1]["cost_usd"], 2.0);
+    }
+
+    #[test]
+    fn unpriced_agents_show_a_dash_and_make_the_total_a_lower_bound() {
+        let mut w = World::new("proj");
+        w.apply(&ev(1_000, spawn("a1", ROOT, "explorer", "Map")), false);
+        w.apply(&ev(2_000, usage(ROOT, "claude-opus-5-5", 1_000_000)), false);
+        w.apply(&ev(3_000, usage("a1", "no-such-model", 500)), false);
+        let md = markdown(&w);
+        assert!(
+            md.contains(
+                "- **Estimated cost:** ~$4.00+ (lower bound: 1 agent on a model with no known price)\n"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("| 500 | - |"), "{md}");
+        let v: Value = serde_json::from_str(&json(&w)).unwrap();
+        assert_eq!(v["cost"]["usd"], 4.0);
+        assert_eq!(v["cost"]["lower_bound"], true);
+        assert_eq!(v["cost"]["unpriced_agents"], 1);
+        assert!(v["agents"][1]["cost_usd"].is_null());
+    }
+
+    #[test]
+    fn nothing_priced_is_a_dash_not_zero() {
+        let mut w = World::new("proj");
+        w.apply(&ev(1_000, usage(ROOT, "no-such-model", 500)), false);
+        let md = markdown(&w);
+        assert!(
+            md.contains("- **Estimated cost:** - (1 agent on a model with no known price)\n"),
+            "{md}"
+        );
+        let v: Value = serde_json::from_str(&json(&w)).unwrap();
+        assert!(v["cost"]["usd"].is_null());
+        assert_eq!(v["cost"]["lower_bound"], true);
+        assert!(v["agents"][0]["cost_usd"].is_null());
+    }
+
+    /// A session with one looping, one erroring and one stalled agent, as of
+    /// its own last event.
+    fn troubled() -> Vec<Event> {
+        use crate::health::STALL_AFTER_CALL_MS;
+        let call = |ts: i64, agent: &str, name: &str, key: u64| {
+            ev(
+                ts,
+                Kind::Tool {
+                    agent: agent.into(),
+                    tool: name.into(),
+                    detail: "SECRET-DETAIL".into(),
+                    key,
+                },
+            )
+        };
+        let mut evs = vec![
+            prompt(1_000),
+            ev(1_000, spawn("loop", ROOT, "worker", "Loops")),
+            ev(1_000, spawn("err", ROOT, "worker", "Fails")),
+            ev(1_000, spawn("quiet", ROOT, "worker", "Waits")),
+            ev(1_000, spawn("fine", ROOT, "worker", "Works")),
+        ];
+        evs.extend((0..4).map(|i| call(2_000 + i * 1_000, "loop", "Bash", 7)));
+        for i in 0..3 {
+            evs.push(call(2_000 + i * 1_000, "err", "Edit", i as u64));
+            evs.push(ev(
+                2_500 + i * 1_000,
+                Kind::ToolError {
+                    agent: "err".into(),
+                },
+            ));
+        }
+        evs.push(call(2_000, "quiet", "Read", 1));
+        evs.push(call(2_000, "fine", "Read", 2));
+        evs.push(ev(
+            3_000,
+            Kind::Finish {
+                id: "fine".into(),
+                ok: true,
+                tokens: None,
+            },
+        ));
+        // Later activity moves the session clock past the stall threshold.
+        // Erroring and looping outrank stalled, so those two stay as they are.
+        evs.push(call(2_000 + STALL_AFTER_CALL_MS + 1, ROOT, "Read", 3));
+        evs
+    }
+
+    #[test]
+    fn health_flags_match_watch_once() {
+        let evs = troubled();
+        let mut w = World::new("proj");
+        load(&mut w, &evs);
+        let v: Value = serde_json::from_str(&json(&w)).unwrap();
+        let mut from_report: Vec<(String, String, String)> = v["flags"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| {
+                let s = |k: &str| f[k].as_str().unwrap().to_string();
+                (s("id"), s("health"), s("reason"))
+            })
+            .collect();
+
+        // `neonhive watch --once`: one poll with no clock.
+        let mut ww = World::new("proj");
+        let alerts = crate::watch::Watcher::new(None, None).poll(&mut ww, &evs, None);
+        let mut from_watch: Vec<(String, String, String)> = alerts
+            .iter()
+            .filter(|a| matches!(a.kind.name(), "looping" | "erroring" | "stalled"))
+            .map(|a| {
+                // Watch prefixes the reason with who it is about.
+                let reason = a.message.trim_start_matches("agent ").to_string();
+                (a.agent.clone().unwrap(), a.kind.name().to_string(), reason)
+            })
+            .collect();
+        from_report.sort();
+        from_watch.sort();
+        assert_eq!(from_report, from_watch);
+        let kinds: Vec<&str> = from_report.iter().map(|f| f.1.as_str()).collect();
+        assert_eq!(kinds, ["erroring", "looping", "stalled"], "{from_report:?}");
+
+        let md = markdown(&w);
+        assert!(
+            md.contains("- **Loops** (worker): looping, loop: Bash x4\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("- **Waits** (worker): stalled, stalled: silent 30:00\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains("- **Fails** (worker): erroring, errors: 3 failed calls in a row (Edit)"),
+            "{md}"
+        );
+        assert_eq!(v["agents"][1]["health"], "looping");
+        assert_eq!(v["agents"][4]["health"], "ok");
+        for out in [md, json(&w)] {
+            assert!(!out.contains("SECRET"));
+        }
+    }
+
+    #[test]
+    fn json_keeps_every_old_key_and_adds_the_new_ones() {
+        let v: Value = serde_json::from_str(&json(&world())).unwrap();
+        let keys = |v: &Value| -> Vec<String> { v.as_object().unwrap().keys().cloned().collect() };
+        assert_eq!(
+            keys(&v),
+            [
+                "agent_count",
+                "agents",
+                "cost",
+                "duration_ms",
+                "errors",
+                "failures",
+                "flags",
+                "schema",
+                "start_ms",
+                "title",
+                "tokens",
+                "tool_calls",
+                "tools"
+            ]
+        );
+        assert_eq!(
+            keys(&v["agents"][0]),
+            [
+                "cost_usd",
+                "depth",
+                "duration_ms",
+                "errors",
+                "health",
+                "id",
+                "label",
+                "models",
+                "parent",
+                "start_ms",
+                "status",
+                "tokens",
+                "tool_calls",
+                "type"
+            ]
+        );
+        assert_eq!(keys(&v["cost"]), ["lower_bound", "unpriced_agents", "usd"]);
     }
 }

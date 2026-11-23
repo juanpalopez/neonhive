@@ -51,6 +51,8 @@ pub struct CodexSource {
     spawns: Vec<Event>,
     messages: HashSet<u64>,
     polls: u32,
+    /// Set by [`Source::poll_to_end`]; passed to every file reader.
+    to_end: bool,
 }
 
 impl CodexSource {
@@ -79,6 +81,7 @@ impl CodexSource {
             spawns: Vec::new(),
             messages: HashSet::new(),
             polls: 0,
+            to_end: false,
         }
     }
 
@@ -140,7 +143,9 @@ impl CodexSource {
                         label,
                     },
                 });
-                self.children.push(Agent::new(path, id));
+                let mut child = Agent::new(path, id);
+                child.lines.to_end = self.to_end;
+                self.children.push(child);
             }
         }
     }
@@ -169,6 +174,15 @@ impl Source for CodexSource {
         events.append(&mut out);
         events.sort_by_key(|e| e.ts); // stable: a spawn stays ahead of same-time events
         events
+    }
+
+    fn poll_to_end(&mut self) -> Vec<Event> {
+        self.to_end = true;
+        self.root.lines.to_end = true;
+        for child in &mut self.children {
+            child.lines.to_end = true;
+        }
+        self.poll()
     }
 }
 
@@ -209,6 +223,9 @@ struct Lines {
     offset: u64,
     carry: Vec<u8>,
     done: bool,
+    /// Treat a last line without a newline as complete. See
+    /// [`Source::poll_to_end`].
+    to_end: bool,
 }
 
 impl Lines {
@@ -218,6 +235,7 @@ impl Lines {
             offset: 0,
             carry: Vec::new(),
             done: false,
+            to_end: false,
         }
     }
 
@@ -259,6 +277,13 @@ impl Lines {
             start += pos + 1;
         }
         buf.drain(..start);
+        if self.to_end && !buf.is_empty() {
+            // One-shot read of a complete file: the last line is whole.
+            if let Ok(line) = std::str::from_utf8(&buf) {
+                each(line);
+            }
+            buf.clear();
+        }
         self.carry = buf; // incomplete last line, finished on a later poll
     }
 }
@@ -1404,6 +1429,18 @@ mod tests {
         s.append(ROOT_FILE, tail);
         assert_eq!(kinds(&src.poll()), vec!["text main hello"]);
         assert!(src.poll().is_empty());
+    }
+
+    #[test]
+    fn poll_to_end_counts_a_last_line_without_newline() {
+        let s = Scratch::new("to-end");
+        s.lines(ROOT_FILE, &[meta("t-root", "")]);
+        s.append(ROOT_FILE, &assistant(3, "hello"));
+        assert!(CodexSource::open(&s.path(ROOT_FILE)).poll().is_empty());
+        assert_eq!(
+            kinds(&CodexSource::open(&s.path(ROOT_FILE)).poll_to_end()),
+            vec!["text main hello"]
+        );
     }
 
     #[test]
