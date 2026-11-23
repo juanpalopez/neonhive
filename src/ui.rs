@@ -1276,7 +1276,7 @@ mod tests {
                 app.search_step(true);
             }
         }
-        app.panes.stream_h = [9, 1, 200][k % 3];
+        app.panes.stream_h = [None, Some(9), Some(1), Some(200)][k % 4];
         app.panes.side_w = [40, 0, 500][(k / 3) % 3];
     }
 
