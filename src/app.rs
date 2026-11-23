@@ -242,7 +242,13 @@ impl App {
         // Half the non-overlapping box slots of the panel, so edges stay readable.
         let (w, h) = (self.view.0 as usize, self.view.1 as usize);
         let cap = ((w / 20) * (h / 4) / 2).clamp(3, 16);
-        let visible = choose_visible(&self.world, cap);
+        // Only a selection the user made is pinned: while following, the
+        // selection jumps to whichever agent acted last, and pinning it would
+        // bring back the churn that spawn order removes.
+        let pinned = (!self.follow)
+            .then(|| self.world.order.get(self.selected))
+            .flatten();
+        let visible = choose_visible(&self.world, cap, pinned.map(String::as_str));
         self.hidden = self.world.order.len() - visible.len();
         self.box_w = match visible.len() {
             0..=6 => 24,
@@ -643,24 +649,73 @@ impl App {
     }
 }
 
-/// Pick which agents get a node: the root, then the most relevant subagents
-/// up to `cap` (active first, then most recently active), plus ancestors.
-pub fn choose_visible(world: &World, cap: usize) -> Vec<String> {
-    let mut subs: Vec<_> = world.agents.values().filter(|a| a.id != ROOT).collect();
-    subs.sort_by_key(|a| {
-        let active = a.status == Status::Running && !world.is_idle(a);
-        (!active, std::cmp::Reverse(a.last_ts), a.order)
-    });
+/// Pick which agents get a node, each with its ancestors, in this order:
+///
+/// 1. the root;
+/// 2. `pinned` (the agent the user selected), then every flagged agent in
+///    spawn order. These do not wait for a slot, so the graph can hold more
+///    than `cap` picks, but never more than `2 * cap + 1` nodes: a pinned or
+///    flagged agent whose chain would pass that bound is left off (it still
+///    counts as archived, and the header still counts its flag);
+/// 3. up to `cap` picks in all: running agents that are not idle, oldest
+///    spawn first, then the others, most recently active first.
+///
+/// Running agents are ordered by spawn, not by their last event, so that
+/// with more of them than slots the set changes only when one starts or
+/// finishes, not on every tool call. The oldest running agents keep their
+/// slots until they finish.
+pub fn choose_visible(world: &World, cap: usize, pinned: Option<&str>) -> Vec<String> {
+    let bound = 2 * cap + 1;
     let mut ids: Vec<String> = vec![ROOT.to_string()];
-    for a in subs.into_iter().take(cap) {
-        let mut cur = Some(a.id.clone());
+    // `id` and the ancestors not yet shown, if they all fit within `limit`.
+    let add = |ids: &mut Vec<String>, id: &str, limit: usize| {
+        let mut chain = Vec::new();
+        let mut cur = Some(id.to_string());
         while let Some(id) = cur {
-            if ids.contains(&id) {
+            if ids.contains(&id) || chain.contains(&id) {
                 break;
             }
             cur = world.agents.get(&id).and_then(|x| x.parent.clone());
-            ids.push(id);
+            chain.push(id);
         }
+        if ids.len() + chain.len() <= limit {
+            ids.extend(chain);
+        }
+    };
+
+    let mut flagged: Vec<_> = world
+        .agents
+        .values()
+        .filter(|a| a.id != ROOT && world.health(a).is_flagged())
+        .collect();
+    flagged.sort_by_key(|a| a.order);
+    let pinned = pinned.filter(|id| *id != ROOT && world.agents.contains_key(*id));
+    let must: Vec<&str> = pinned
+        .into_iter()
+        .chain(
+            flagged
+                .iter()
+                .map(|a| a.id.as_str())
+                .filter(|id| Some(*id) != pinned),
+        )
+        .collect();
+    for id in &must {
+        add(&mut ids, id, bound);
+    }
+
+    let mut subs: Vec<_> = world
+        .agents
+        .values()
+        .filter(|a| a.id != ROOT && !must.contains(&a.id.as_str()))
+        .collect();
+    subs.sort_by_key(|a| {
+        let active = a.status == Status::Running && !world.is_idle(a);
+        let recent = if active { 0 } else { a.last_ts };
+        (!active, std::cmp::Reverse(recent), a.order)
+    });
+    let picks = cap.saturating_sub(must.len());
+    for a in subs.into_iter().take(picks) {
+        add(&mut ids, &a.id, bound);
     }
     ids.sort_by_key(|id| world.agents.get(id).map(|a| a.order).unwrap_or(0));
     ids
@@ -831,7 +886,7 @@ mod tests {
                 };
                 spawn(&mut world, &format!("a{i}"), &parent, i as i64);
             }
-            let visible = choose_visible(&world, 16);
+            let visible = choose_visible(&world, 16, None);
             let space = Space::new((150, 44), 16);
             let pos = layout(&world, &visible, &space);
             assert_eq!(pos[ROOT], (0.0, 0.0));
@@ -857,9 +912,16 @@ mod tests {
         let mut world = World::new("root");
         for i in 0..30 {
             spawn(&mut world, &format!("a{i}"), ROOT, i);
+            let kind = Kind::Finish {
+                id: format!("a{i}"),
+                ok: true,
+                tokens: None,
+            };
+            world.apply(&Event { ts: 50, kind }, false);
         }
+        // The only running agent, under a finished one.
         spawn(&mut world, "child", "a0", 100);
-        let visible = choose_visible(&world, 5);
+        let visible = choose_visible(&world, 5, None);
         assert!(visible.contains(&ROOT.to_string()));
         assert!(visible.contains(&"child".to_string()));
         assert!(
@@ -867,6 +929,116 @@ mod tests {
             "parent of a visible node must be visible"
         );
         assert!(visible.len() <= 5 + 2);
+    }
+
+    fn tool(world: &mut World, agent: &str, key: u64, ts: i64) {
+        let kind = Kind::Tool {
+            agent: agent.into(),
+            tool: "Bash".into(),
+            detail: "ls".into(),
+            key,
+        };
+        world.apply(&Event { ts, kind }, false);
+    }
+
+    fn has(visible: &[String], id: &str) -> bool {
+        visible.iter().any(|v| v == id)
+    }
+
+    /// 30 running agents, then `p` and its child `f`, then `late`; all
+    /// spawned in that order, so by spawn order `f` would get no slot.
+    fn crowded() -> World {
+        let mut world = World::new("root");
+        for i in 0..30 {
+            spawn(&mut world, &format!("a{i}"), ROOT, i);
+        }
+        spawn(&mut world, "p", ROOT, 40);
+        spawn(&mut world, "f", "p", 41);
+        spawn(&mut world, "late", ROOT, 42);
+        for i in 0..30 {
+            tool(&mut world, &format!("a{i}"), i as u64, 100 + i);
+        }
+        world
+    }
+
+    #[test]
+    fn flagged_agent_and_its_ancestors_stay_visible() {
+        let mut world = crowded();
+        assert!(!has(&choose_visible(&world, 5, None), "f"));
+        // Four identical calls in a row: a loop.
+        for t in 0..4 {
+            tool(&mut world, "f", 999, 200 + t);
+        }
+        // More recent activity everywhere else.
+        for i in 0..30 {
+            tool(&mut world, &format!("a{i}"), 1000 + i as u64, 300 + i);
+        }
+        assert!(world.health(&world.agents["f"]).is_flagged());
+        let visible = choose_visible(&world, 5, None);
+        assert!(has(&visible, "f"), "flagged agent hidden: {visible:?}");
+        assert!(has(&visible, "p"), "its parent must show too");
+        assert!(has(&visible, ROOT));
+        assert!(!has(&visible, "late"));
+        assert!(visible.len() <= 2 * 5 + 1);
+    }
+
+    #[test]
+    fn selected_agent_and_its_ancestors_stay_visible() {
+        let world = crowded();
+        let visible = choose_visible(&world, 5, Some("f"));
+        assert!(has(&visible, "f"), "selected agent hidden: {visible:?}");
+        assert!(has(&visible, "p"));
+        assert!(has(&visible, ROOT));
+        // The pin takes one of the cap's picks.
+        assert_eq!(visible.len(), 1 + 2 + 4);
+        // The root and unknown ids pin nothing.
+        assert_eq!(choose_visible(&world, 5, Some(ROOT)).len(), 1 + 5);
+        assert_eq!(choose_visible(&world, 5, Some("nope")).len(), 1 + 5);
+    }
+
+    #[test]
+    fn must_show_agents_past_the_bound_are_left_off() {
+        let mut world = World::new("root");
+        for i in 0..20 {
+            spawn(&mut world, &format!("a{i}"), ROOT, i);
+            for t in 0..4 {
+                tool(&mut world, &format!("a{i}"), 7, 100 + i * 10 + t);
+            }
+        }
+        assert_eq!(world.flagged(), 20);
+        let visible = choose_visible(&world, 3, Some("a19"));
+        assert_eq!(visible.len(), 2 * 3 + 1, "{visible:?}");
+        // The selection first, then flagged agents oldest first.
+        for id in ["a19", "a0", "a1", "a2", "a3", "a4"] {
+            assert!(has(&visible, id), "{id} missing: {visible:?}");
+        }
+    }
+
+    #[test]
+    fn running_agents_past_the_cap_do_not_churn() {
+        let mut world = World::new("root");
+        for i in 0..40 {
+            spawn(&mut world, &format!("a{i}"), ROOT, i);
+        }
+        let before = choose_visible(&world, 10, None);
+        assert_eq!(before.len(), 11);
+        // The newest agents act most, which used to pull them in.
+        for round in 0..3 {
+            for i in (0..40).rev() {
+                let ts = 1000 + round * 100 + (40 - i);
+                tool(&mut world, &format!("a{i}"), (round * 100 + i) as u64, ts);
+                assert_eq!(choose_visible(&world, 10, None), before, "a{i}");
+            }
+        }
+        // A finish frees a slot for the next running agent by spawn order.
+        let kind = Kind::Finish {
+            id: "a0".into(),
+            ok: true,
+            tokens: None,
+        };
+        world.apply(&Event { ts: 2000, kind }, false);
+        let after = choose_visible(&world, 10, None);
+        assert!(!has(&after, "a0") && has(&after, "a10"), "{after:?}");
     }
 
     #[test]
