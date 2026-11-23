@@ -138,6 +138,23 @@ cargo run -- --demo --snapshot 20 --svg shot.svg   # image
 The demo is scripted, not random, so the same command gives the same frame before
 and after your change. For visual changes, please include a before and after.
 
+### Regenerating the README recording
+
+The animation at the top of the README (`docs/demo.gif`) is a recording of
+`neonhive --demo`, scripted in [`docs/demo.tape`](docs/demo.tape) with
+[VHS](https://github.com/charmbracelet/vhs). After a visible UI change, re-record it:
+
+```sh
+brew install vhs          # brings ttyd; ffmpeg must be installed too
+scripts/record-demo.sh    # builds a release binary, records, writes docs/demo.gif
+```
+
+The tape sets the terminal (Menlo 20 pt, 113 x 35 cells, which keeps the side
+column visible) and the keys pressed; the script turns VHS's lossless frames into
+a 10 fps, 64-colour GIF and warns if it grows past 3.5 MB. Look at the result
+before you commit it. The demo's event order is fixed but runs on the wall clock,
+so two recordings can differ by a frame or so. Never record a real session.
+
 ## Where things are
 
 | File | Role |

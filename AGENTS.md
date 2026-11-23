@@ -80,4 +80,4 @@ Tests do not show what the screen looks like. For any change to `ui`, `app` layo
 | `src/svg.rs` | SVG export |
 | `src/fx.rs`, `src/util.rs` | Palette and color math; text and time helpers |
 | `scripts/` | CI checks, runnable locally (see Commands) |
-| `docs/` | `ARCHITECTURE.md`, `RELEASING.md`, `demo.svg` |
+| `docs/` | `ARCHITECTURE.md`, `RELEASING.md`, `demo.gif` (README recording) and `demo.tape` (its VHS script, run by `scripts/record-demo.sh`) |

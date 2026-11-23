@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/demo.svg" alt="neonhive showing a swarm of AI subagents as an animated graph in the terminal" width="100%">
+  <img src="docs/demo.gif" alt="Recording of neonhive --demo: a main agent spawns subagents that run tools and send messages while tokens and cost climb; a subagent is selected, the graph is shown full size, and a search of the event stream finds a loop flag" width="100%">
 </p>
 
 When a coding agent fans out into ten subagents, the terminal shows you one spinner.
