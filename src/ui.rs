@@ -259,7 +259,9 @@ fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
         line.render(area, buf);
         return;
     }
-    let keys = " ? help  tab focus  z full  ↑↓ select/scroll  / search  [ ] < > resize  f follow  c cost  space pause  . , step  e captions  +/- speed  r replay  l live  esc back  q quit";
+    // The step keys do nothing in a live session, so they are not offered.
+    let step = if app.can_step() { ". , step  " } else { "" };
+    let keys = format!(" ? help  tab focus  z full  ↑↓ select/scroll  / search  [ ] < > resize  f follow  c cost  space pause  {step}e captions  +/- speed  r replay  l live  esc back  q quit");
     let mut spans = Vec::new();
     if !p.query.is_empty() {
         let grep = if p.filter { "& all lines" } else { "& grep" };
@@ -1211,7 +1213,7 @@ const HELP: [&str; 34] = [
     "",
     "f            follow most recent activity",
     "c            roster: cost by agent type",
-    "space        pause or resume replay",
+    "space        pause or resume replay or demo",
     ". ,          paused: step to next / previous",
     "             event (pauses a playing replay)",
     "e            captions: explain each event",
@@ -1575,6 +1577,18 @@ mod tests {
             let off_rows: Vec<&str> = off.lines().collect();
             assert!(!off_rows[h as usize - 3].starts_with(" ◆ "), "{off}");
         }
+    }
+
+    #[test]
+    fn footer_offers_step_keys_only_where_they_work() {
+        let mut app = busy_app();
+        assert!(app.mode == Mode::Live && !app.pausable);
+        assert!(!frame(&mut app, 220, 40).contains(". , step"));
+        app.pausable = true;
+        assert!(frame(&mut app, 220, 40).contains(". , step"));
+        app.pausable = false;
+        app.restart();
+        assert!(frame(&mut app, 220, 40).contains(". , step"), "replay");
     }
 
     #[test]

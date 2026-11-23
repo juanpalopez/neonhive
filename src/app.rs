@@ -284,7 +284,15 @@ impl App {
     fn rebuild(&mut self, target: usize) {
         self.world = World::new(&self.root_label);
         self.cursor = 0;
+        // Stalls are found by the clock, not by events: sweep where playback
+        // would have, at each stall limit passed before the next event, or
+        // where playback lands after skipping dead time.
+        let max_gap = (MAX_GAP_SECS * 1000.0 * self.speed()) as i64;
         while self.cursor < target.min(self.history.len()) {
+            let ts = self.history[self.cursor].ts;
+            if self.cursor > 0 {
+                self.world.sweep_stalls_until(ts, ts - max_gap);
+            }
             self.apply_next(false);
         }
         self.world.fx.clear();
@@ -296,7 +304,22 @@ impl App {
         self.world.now_ts = self.vt as i64;
         self.world.sweep_health();
         self.selected = self.selected.min(self.world.order.len() - 1);
-        self.stream_tail();
+        // Keep the stream scroll and the current match while their lines
+        // still exist; follow the tail when they are gone.
+        let seq = self.world.log_seq;
+        if self.panes.anchor.is_some_and(|a| a >= seq) {
+            self.panes.anchor = None;
+        }
+        self.panes.paused_at = self.panes.paused_at.min(seq);
+        if self.panes.current.is_some_and(|c| c >= seq) {
+            self.panes.current = None;
+        }
+    }
+
+    /// Whether `.` and `,` do anything: a replay, or a live view that can be
+    /// paused (the demo).
+    pub fn can_step(&self) -> bool {
+        self.mode == Mode::Replay || self.pausable
     }
 
     /// The most recent event that wrote a stream line, and how many other
@@ -1225,6 +1248,152 @@ mod tests {
         assert!(live.cursor < before.0);
         live.jump_to_end();
         assert!(live.mode == Mode::Live);
+    }
+
+    /// A source that hands over a fixed list of events on the first poll.
+    struct Fixed(Vec<Event>);
+
+    impl Source for Fixed {
+        fn poll(&mut self) -> Vec<Event> {
+            std::mem::take(&mut self.0)
+        }
+    }
+
+    /// A session with two stalls: `quiet` goes silent after text while
+    /// `busy` keeps calling tools every 5 s (the stall limit passes between
+    /// two events), then `busy` waits on a call through a 40 minute gap
+    /// that playback skips.
+    fn stalling() -> Vec<Event> {
+        let t0 = 1_700_000_000_000;
+        let spawn = |id: &str| Kind::Spawn {
+            id: id.into(),
+            parent: ROOT.into(),
+            agent_type: id.into(),
+            label: "work".into(),
+        };
+        let call = |n: i64| Kind::Tool {
+            agent: "busy".into(),
+            tool: "Read".into(),
+            detail: format!("f{n}"),
+            key: n as u64,
+        };
+        let mut evs = vec![
+            Event {
+                ts: t0,
+                kind: spawn("quiet"),
+            },
+            Event {
+                ts: t0,
+                kind: spawn("busy"),
+            },
+            Event {
+                ts: t0 + 1_000,
+                kind: Kind::Text {
+                    agent: "quiet".into(),
+                    text: "thinking".into(),
+                },
+            },
+        ];
+        for n in 1..=150 {
+            evs.push(Event {
+                ts: t0 + n * 5_000,
+                kind: call(n),
+            });
+        }
+        let late = t0 + 150 * 5_000 + 40 * 60_000;
+        evs.push(Event {
+            ts: late,
+            kind: call(1_000),
+        });
+        evs.push(Event {
+            ts: late + 1_000,
+            kind: Kind::Text {
+                agent: ROOT.into(),
+                text: "done".into(),
+            },
+        });
+        evs
+    }
+
+    fn lines(app: &App) -> Vec<(i64, String, String)> {
+        app.world
+            .log
+            .iter()
+            .map(|l| (l.ts, l.agent.clone(), l.text.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn rebuilt_log_keeps_the_stall_lines_playback_wrote() {
+        let mut played = App::new(Box::new(Fixed(stalling())), Mode::Replay, "s", "s");
+        // Played logs at every step stop, captured as playback reaches it.
+        let mut at: HashMap<usize, Vec<(i64, String, String)>> = HashMap::new();
+        while !played.at_end() {
+            played.tick(1.0 / 30.0);
+            at.entry(played.cursor).or_insert_with(|| lines(&played));
+        }
+        for _ in 0..30 {
+            played.tick(1.0 / 30.0);
+        }
+        let stalls = played
+            .world
+            .log
+            .iter()
+            .filter(|l| l.kind == crate::state::LogKind::Health)
+            .count();
+        assert_eq!(stalls, 2, "both agents stalled while playing");
+
+        let mut rebuilt = App::new(Box::new(Fixed(stalling())), Mode::Replay, "s", "s");
+        rebuilt.paused = true;
+        rebuilt.tick(0.0);
+        rebuilt.jump_to_end();
+        rebuilt.mode = Mode::Replay;
+        let points = rebuilt.step_points(rebuilt.history.len());
+        let mut compared = 0;
+        for &p in &points {
+            let Some(want) = at.get(&p) else { continue };
+            rebuilt.rebuild(p);
+            rebuilt.tick(0.0);
+            let got = lines(&rebuilt);
+            assert_eq!(got.len(), want.len(), "lines at event {p}");
+            for (g, w) in got.iter().zip(want) {
+                assert_eq!((&g.1, &g.2), (&w.1, &w.2), "at event {p}");
+                // Playback notices a stall within one frame (8x: 267 ms).
+                assert!((g.0 - w.0).abs() <= 300, "at event {p}: {g:?} {w:?}");
+            }
+            compared += 1;
+        }
+        assert!(compared > 20, "compared {compared} stops");
+        // Stepping back from the end keeps both stall lines too.
+        rebuilt.rebuild(rebuilt.history.len());
+        assert!(rebuilt.step_back());
+        let stalls = rebuilt
+            .world
+            .log
+            .iter()
+            .filter(|l| l.kind == crate::state::LogKind::Health)
+            .count();
+        assert_eq!(stalls, 2);
+    }
+
+    #[test]
+    fn step_back_keeps_the_stream_scroll_and_match() {
+        let mut app = loaded(9, 30);
+        for _ in 0..60 {
+            app.step_forward();
+        }
+        app.scroll_stream(-5);
+        let anchor = app.panes.anchor.expect("scrolled back");
+        app.panes.current = Some(anchor);
+        app.step_back();
+        assert_eq!(app.panes.anchor, Some(anchor), "line still there");
+        assert_eq!(app.panes.current, Some(anchor));
+        // Back past the anchored line: follow the tail again.
+        while app.world.log_seq > anchor {
+            app.step_back();
+        }
+        assert_eq!(app.panes.anchor, None);
+        assert_eq!(app.panes.current, None);
     }
 
     #[test]

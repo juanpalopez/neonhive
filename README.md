@@ -310,9 +310,11 @@ neonhive --demo --snapshot 20 --captions                   # with a caption
 `--from` is another name for `--snapshot`; both count seconds of replay as you would
 watch it, at the replay speed and with long gaps skipped. `--to` exports every frame
 up to that time as one looping SVG (CSS animation, no scripts), at `--fps` frames per
-second (default 5, at most 30). Text that stays put across frames is written once,
-so a 60 second range of the demo at 140x40 is about 3.5 MB at 5 fps and 1.8 MB at
-2 fps.
+second: 1, 2, 3, 5 (the default), 6, 10, 15 or 30, so the loop lasts exactly the
+range. Text that stays put across frames is written once, so a 60 second range of
+the demo at 140x40 is about 3.5 MB at 5 fps and 1.8 MB at 2 fps. One SVG holds at
+most 1,800 frames (6 minutes at 5 fps, about 21 MB); for a longer range, export
+less of it or lower `--fps`. Characters that XML does not allow are written as `�`.
 
 An export of a real session (anything but `--demo`) can contain private prompts,
 code and file paths from that session. neonhive prints a warning when it writes one;

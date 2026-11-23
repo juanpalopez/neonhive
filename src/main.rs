@@ -61,19 +61,20 @@ struct Args {
     /// With --svg and --to: where the exported animation starts.
     #[arg(long, visible_alias = "from", value_name = "SECONDS")]
     snapshot: Option<f64>,
-    /// With --snapshot: write the frame to this SVG file instead of stdout.
-    #[arg(long, value_name = "FILE", requires = "snapshot")]
+    /// With --snapshot (or --from): write the frame to this SVG file instead
+    /// of stdout.
+    #[arg(long, value_name = "FILE")]
     svg: Option<PathBuf>,
     /// With --svg: number of frames in a looping animated SVG.
     #[arg(long, default_value_t = 1, requires = "svg", conflicts_with = "to")]
     frames: usize,
-    /// With --svg: export an animation from --from (or --snapshot) to this
-    /// many seconds of replay.
-    #[arg(long, value_name = "SECONDS", requires = "svg")]
+    /// With --svg and --from: export an animation up to this many seconds of
+    /// replay.
+    #[arg(long, value_name = "SECONDS")]
     to: Option<f64>,
-    /// With --svg: frames per second of an animated SVG, 1 to 30. Fewer
-    /// frames make a smaller file.
-    #[arg(long, default_value_t = 5, requires = "svg", value_parser = clap::value_parser!(u32).range(1..=30))]
+    /// With --svg: frames per second of an animated SVG. Must divide 30: 1,
+    /// 2, 3, 5, 6, 10, 15 or 30. Fewer frames make a smaller file.
+    #[arg(long, default_value_t = 5, requires = "svg", value_parser = parse_fps)]
     fps: u32,
     /// Start with captions on: a plain-language line about each event.
     #[arg(long)]
@@ -109,8 +110,41 @@ enum Command {
     },
 }
 
+/// Frame rates an animated SVG can have: frames are 1/30 s ticks apart, so
+/// the rate must divide 30 for the loop to last exactly `--to` - `--from`.
+const FPS: [u32; 8] = [1, 2, 3, 5, 6, 10, 15, 30];
+
+/// Most frames one animated SVG may hold. At 140x40 the demo writes about
+/// 11 KB a frame, so the limit is about 21 MB of SVG and 63 MB of memory.
+const MAX_FRAMES: usize = 1_800;
+
+fn parse_fps(s: &str) -> Result<u32, String> {
+    match s.parse::<u32>() {
+        Ok(n) if FPS.contains(&n) => Ok(n),
+        _ => Err("must divide 30: one of 1, 2, 3, 5, 6, 10, 15, 30".into()),
+    }
+}
+
+/// Checks between flags that clap cannot word well: each names the flag
+/// that is missing.
+fn check_args(args: &Args) -> Result<(), String> {
+    if args.to.is_some() && (args.snapshot.is_none() || args.svg.is_none()) {
+        return Err("--to needs --from SECONDS (where the animation starts) and --svg FILE".into());
+    }
+    if args.svg.is_some() && args.snapshot.is_none() {
+        return Err("--svg needs --snapshot SECONDS (or --from SECONDS with --to)".into());
+    }
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+    if let Err(msg) = check_args(&args) {
+        use clap::CommandFactory;
+        Args::command()
+            .error(clap::error::ErrorKind::MissingRequiredArgument, msg)
+            .exit();
+    }
     if let Some(file) = &args.prices {
         if let Err(e) = pricing::load(file) {
             if matches!(args.command, Some(Command::Watch { .. })) {
@@ -489,13 +523,28 @@ fn export_warning(args: &Args) -> Option<String> {
 }
 
 /// Number of frames to export: `--frames`, or enough to cover `--from` to
-/// `--to` at `--fps`.
+/// `--to` at `--fps`. Refuses more than `MAX_FRAMES`.
 fn frame_count(args: &Args, from: f64) -> anyhow::Result<usize> {
-    let Some(to) = args.to else {
-        return Ok(args.frames.max(1));
+    let n = match args.to {
+        None => args.frames.max(1),
+        Some(to) => {
+            anyhow::ensure!(to > from, "--to must be later than --from");
+            (((to - from) * args.fps as f64).round() as usize).max(1)
+        }
     };
-    anyhow::ensure!(to > from, "--to must be later than --from");
-    Ok((((to - from) * args.fps as f64).round() as usize).max(1))
+    anyhow::ensure!(
+        n <= MAX_FRAMES,
+        "{n} frames is more than the limit of {MAX_FRAMES} for one SVG; \
+         export a shorter range or a lower --fps (at {} fps the limit is {} s)",
+        args.fps,
+        MAX_FRAMES / args.fps as usize
+    );
+    Ok(n)
+}
+
+/// 1/30 s ticks between two exported frames.
+fn ticks_per_frame(fps: u32) -> usize {
+    (30 / fps.max(1)).max(1) as usize
 }
 
 /// Headless render of one frame, for tests, screenshots and bug reports.
@@ -529,18 +578,19 @@ fn snapshot(args: &Args, secs: f64) -> anyhow::Result<()> {
     term.draw(|f| ui::draw(f, &mut app))?;
     if let Some(file) = &args.svg {
         // Frames are captured 1/fps s apart (in 1/30 s ticks) and loop at
-        // the same rate, so the animation plays in replay time.
-        let per = (30.0 / args.fps as f64).round().max(1.0) as usize;
-        let fps = 30.0 / per as f32;
-        let mut shots = vec![term.backend().buffer().clone()];
+        // the same rate, so the animation plays in replay time. Each frame
+        // is cut into runs as it is captured; no buffer is kept.
+        let per = ticks_per_frame(args.fps);
+        let mut anim = svg::Animation::new();
+        anim.push(term.backend().buffer());
         for _ in 1..frames {
             for _ in 0..per {
                 app.tick(1.0 / 30.0);
             }
             term.draw(|f| ui::draw(f, &mut app))?;
-            shots.push(term.backend().buffer().clone());
+            anim.push(term.backend().buffer());
         }
-        std::fs::write(file, svg::document(&shots, fps))?;
+        std::fs::write(file, anim.finish(args.fps as f32))?;
         return Ok(());
     }
     let buf = term.backend().buffer();
@@ -864,6 +914,65 @@ mod tests {
         ];
         assert!(Args::try_parse_from(std::iter::once("neonhive").chain(fast)).is_err());
         assert!(args(&["--demo", "--captions"]).captions);
+    }
+
+    #[test]
+    fn every_accepted_fps_loops_for_exactly_the_range() {
+        for fps in FPS {
+            let f = fps.to_string();
+            let a = args(&[
+                "--demo", "--from", "10", "--to", "20", "--svg", "x", "--fps", &f,
+            ]);
+            let frames = frame_count(&a, 10.0).unwrap();
+            // Frames are ticks_per_frame 1/30 s ticks apart; the loop lasts
+            // frames / fps.
+            assert_eq!(frames * ticks_per_frame(fps), 10 * 30, "fps {fps}");
+            assert_eq!(frames as f32 / fps as f32, 10.0, "fps {fps}");
+        }
+        for bad in ["0", "4", "7", "20", "25", "31", "x"] {
+            let line = [
+                "--demo", "--from", "1", "--to", "3", "--svg", "x", "--fps", bad,
+            ];
+            assert!(
+                Args::try_parse_from(std::iter::once("neonhive").chain(line)).is_err(),
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn long_ranges_are_refused_with_the_limit() {
+        let ok = args(&["--demo", "--from", "0", "--to", "360", "--svg", "x"]);
+        assert_eq!(frame_count(&ok, 0.0).unwrap(), MAX_FRAMES);
+        let long = args(&["--demo", "--from", "0", "--to", "600", "--svg", "x"]);
+        let e = frame_count(&long, 0.0).unwrap_err().to_string();
+        assert!(
+            e.contains("1800") && e.contains("--fps") && e.contains("360 s"),
+            "{e}"
+        );
+        let many = args(&[
+            "--demo",
+            "--snapshot",
+            "1",
+            "--svg",
+            "x",
+            "--frames",
+            "5000",
+        ]);
+        assert!(frame_count(&many, 1.0).is_err());
+    }
+
+    #[test]
+    fn missing_flags_are_named() {
+        let e = check_args(&args(&["--demo", "--to", "9", "--svg", "x"])).unwrap_err();
+        assert!(e.contains("--from"), "{e}");
+        let e = check_args(&args(&["--demo", "--from", "1", "--to", "9"])).unwrap_err();
+        assert!(e.contains("--svg"), "{e}");
+        let e = check_args(&args(&["--demo", "--svg", "x"])).unwrap_err();
+        assert!(e.contains("--snapshot"), "{e}");
+        assert!(check_args(&args(&["--demo", "--from", "1", "--to", "9", "--svg", "x"])).is_ok());
+        assert!(check_args(&args(&["--demo", "--snapshot", "1"])).is_ok());
+        assert!(check_args(&args(&["--demo"])).is_ok());
     }
 
     #[test]
