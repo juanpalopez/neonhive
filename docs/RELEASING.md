@@ -67,27 +67,51 @@ Replace `x.y.z` with the new version (Semantic Versioning).
    --locked` and packages it with `scripts/build-release-archive.sh` into
    `neonhive-vX.Y.Z-<target>.tar.gz` (the binary, `LICENSE`, `README.md`) plus a
    `.sha256` file. Targets: `aarch64-apple-darwin`, `x86_64-apple-darwin` (cross-compiled
-   on Apple silicon), `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (Ubuntu
-   22.04, for an older glibc), `x86_64-unknown-linux-musl` (static). Every binary except
-   `x86_64-apple-darwin` is run once (`--version`, a `--demo --snapshot` frame) before it
-   is kept. The build jobs can only read the repository.
-4. `github release`: once every target has built, creates the GitHub Release for the
-   tag with that version's changelog section as the notes (if it already exists, its
-   notes are updated), checks each archive against its `.sha256`, and uploads the
-   archives, the `.sha256` files and a combined `SHA256SUMS`. Assets of an earlier
-   attempt are replaced.
+   on Apple silicon), `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+   `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` (Ubuntu 24.04 runners; the
+   `-gnu` builds need glibc 2.39 or newer, the `-musl` builds are static). Every binary
+   except `x86_64-apple-darwin` is run once (`--version`, a `--demo --snapshot` frame)
+   before it is kept. The build jobs can only read the repository.
+4. `draft github release`: once every target has built, creates the GitHub Release for
+   the tag as a **draft**, with that version's changelog section as the notes, checks each
+   archive against its `.sha256`, and uploads the archives, the `.sha256` files and a
+   combined `SHA256SUMS`. A draft is visible only to people with write access; the tag
+   itself is already public, since it was pushed. On a re-run the existing release's notes
+   are updated, its draft or published state is left alone, and assets are replaced.
 5. `publish to crates.io`: runs `cargo publish` if the `CARGO_REGISTRY_TOKEN` secret is set;
-   otherwise it skips with a notice and the run still succeeds. A version that is already
-   on crates.io is not an error.
-6. `update homebrew tap`: if the `HOMEBREW_TAP_TOKEN` secret is set, renders the formula
+   otherwise it skips with a notice and the job still succeeds, so the release is still
+   published in the next step. A version that is already on crates.io is not an error.
+6. `publish github release`: turns the draft into a published release
+   (`gh release edit vX.Y.Z --draft=false`); a no-op if it is already published.
+7. `update homebrew tap`: if the `HOMEBREW_TAP_TOKEN` secret is set, renders the formula
    for the tag with `scripts/render-homebrew-formula.sh` and pushes it as
-   `Formula/neonhive.rb` to `juanpalopez/homebrew-tap`. Otherwise, and for pre-releases,
-   it skips with a notice and the run still succeeds. An unchanged formula is not
+   `Formula/neonhive.rb` to `juanpalopez/homebrew-tap`. Without the secret it skips with a
+   warning annotation on the run (so a missing tap is visible), and pre-releases are
+   skipped with a notice; either way the run succeeds. An unchanged formula is not
    committed again.
 
-The steps run one after another, each only when the one before succeeded. crates.io comes
-after the binaries and the release on purpose: a crates.io version cannot be replaced, so
-anything that could fail in a way that needs a code fix and a new tag runs first.
+The steps run one after another, each only when the one before succeeded, and one release
+run per tag at a time. Up to step 4 nothing is public or irreversible. From step 5 on,
+each step is irreversible in practice: a crates.io version cannot be replaced, a published
+release may already have been downloaded, and the tap pins the SHA-256 of the tag's
+source tarball, which changes if the tag moves. So anything that could fail in a way that
+needs a code fix and a new tag runs before step 5.
+
+**Never move a tag once step 5 has started** (crates.io published, even if the release is
+still a draft), once the release is published, or once the tap has the version. Fix
+forward with a new patch version instead.
+
+Actions in `ci.yml` and `release.yml` are pinned to full commit SHAs with the version in
+a trailing comment (`# v4.4.0`); Dependabot (`.github/dependabot.yml`, github-actions)
+updates such pins and their comments. `dtolnay/rust-toolchain` has no release tags, so it
+is pinned to a commit on its `master` branch with `toolchain: stable` passed explicitly;
+Dependabot does not move that pin, so bump it by hand now and then (any commit in
+`master` history; see that action's README).
+
+Runner images: the Linux builds use `ubuntu-24.04` and `ubuntu-24.04-arm`.
+`ubuntu-22.04` was deprecated on 2026-09-17 and is retired on 2027-04-17
+(actions/runner-images#14254). When 24.04 gets a deprecation notice, move to the next
+image and update the glibc floor in the README.
 
 ## Homebrew tap
 
@@ -129,7 +153,8 @@ cd ../homebrew-tap && git commit -am "neonhive x.y.z" && git push
 ```
 
 `scripts/update-homebrew-tap.sh x.y.z` does the same from a temporary clone;
-`DRY_RUN=1` commits there without pushing.
+`DRY_RUN=1` commits there without pushing, and works without a token (the tap is
+cloned anonymously).
 
 To check a formula change before a release, copy it into a local tap and let Homebrew
 build and test it:
@@ -169,18 +194,29 @@ crates.io documentation if you want to switch.
   and push again. Only do this while no GitHub Release or crates.io version exists for it.
 - `ci` fails: same as above (fix by pull request, re-tag), since the tagged commit is
   not releasable.
-- `build`, `github release`, `publish to crates.io` or `update homebrew tap` fails for a
-  transient reason (a runner or network problem): open the run and use "Re-run failed
-  jobs". Every step is safe to repeat; the later steps run again after it.
-- A `build` job fails for a reason that needs a code fix: nothing was published, because
-  the release, crates.io and the tap wait for every build. Fix it through a new pull
-  request and move the tag, as for a failed `ci`. If a GitHub Release already exists from
-  an earlier attempt, delete it first (`gh release delete vx.y.z`).
-- `github release` succeeded but `publish to crates.io` failed for a reason that needs a
-  fix: the release can still be deleted and the tag moved, as long as nothing reached
-  crates.io.
-- A version was published to crates.io with a mistake: it cannot be overwritten. Run
-  `cargo yank --version x.y.z`, fix forward, and release `x.y.(z+1)`.
-- The token was missing and the publish was skipped: add the secret, then re-run the
-  `Release` workflow for that tag from the Actions tab. The same holds for the tap and
-  `HOMEBREW_TAP_TOKEN`, or update the tap by hand as shown above.
+For any job that fails for a transient reason (a runner or network problem), open the run
+and use "Re-run failed jobs": every job is safe to repeat, and the later jobs run again
+after it. "Re-run all jobs" is safe too (build artifacts are overwritten, assets replaced).
+What a failure leaves behind, and what to do when it needs a fix:
+
+- `build` fails: no release, nothing on crates.io, no tap change. Fix by pull request and
+  move the tag, as for a failed `ci`.
+- `draft github release` fails: at most a draft release, possibly with only some assets;
+  nothing public. Re-run, or delete the draft (`gh release delete vx.y.z`; keep the tag)
+  and move the tag after a fix.
+- `publish to crates.io` fails: a complete draft release; nothing on crates.io and nothing
+  public. If it needs a fix, delete the draft and move the tag. If crates.io shows the
+  version anyway (the upload went through before the job failed), do not move the tag;
+  re-run, and the job treats "already exists" as success.
+- `publish github release` fails: the crate is on crates.io and the release is still a
+  draft with every asset. Re-run the job, or publish the draft from the releases page. Do
+  not move the tag.
+- `update homebrew tap` fails: the crate and release are public; the tap has the previous
+  version. Re-run the job or update the tap by hand (above). Do not move the tag.
+- A version was published to crates.io, or a release or tap update went out, with a
+  mistake: none of these can be taken back cleanly. Run `cargo yank --version x.y.z` if
+  the crate is affected, fix forward, and release `x.y.(z+1)`.
+- A token was missing and that step was skipped (a notice for crates.io, a warning for
+  the tap): add the secret, then re-run the `Release` workflow for that tag from the
+  Actions tab; steps already done are no-ops. The tap can also be updated by hand as shown
+  above.

@@ -16,7 +16,8 @@ class Neonhive < Formula
   end
 
   test do
-    assert_match "neonhive #{version}", shell_output("#{bin}/neonhive --version")
+    # A version pattern, not #{version}: a --HEAD install has version "HEAD-<sha>".
+    assert_match(/^neonhive \d+\.\d+\.\d+/, shell_output("#{bin}/neonhive --version"))
     # A headless frame of the scripted demo: needs no terminal and no sessions.
     frame = shell_output("#{bin}/neonhive --demo --snapshot 5 --size 100x30")
     assert_match "NEONHIVE", frame

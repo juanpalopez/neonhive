@@ -6,11 +6,13 @@ name: Release
 # never pushes to main and never opens pull requests. Its only push is one
 # commit to the Homebrew tap repository, and only when HOMEBREW_TAP_TOKEN is set.
 #
-# Order: verify -> ci -> build (all targets) -> github release -> crates.io ->
-# homebrew tap. Each step starts only when everything before it succeeded, so
-# a failure leaves nothing that cannot be repeated: re-running the failed jobs
-# is always safe, and the irreversible crates.io publish comes after every
-# step that might still need a fix and a new tag.
+# Order: verify -> ci -> build (all targets) -> draft release with assets ->
+# crates.io -> publish the release -> homebrew tap. Each job starts only when
+# the one before it succeeded. Until crates.io, nothing is public or
+# irreversible: the release is a draft and the tag can still be moved. The
+# crates.io publish, the published release and the tap push are irreversible
+# in practice (the tap pins the tag's tarball checksum), so after any of them
+# the tag must never move; fix forward with a new version.
 
 on:
   push:
@@ -19,6 +21,14 @@ on:
 permissions:
   contents: read
 
+# One release run per tag at a time; a second push of the same tag waits
+# instead of racing the first. The name must differ from ci.yml's group, which
+# is "<workflow>-<ref>" = "Release-<ref>" when called from here; group names
+# are case-insensitive, so "release-<ref>" would collide with it.
+concurrency:
+  group: release-tag-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   verify:
     name: verify tag
@@ -26,7 +36,7 @@ jobs:
     timeout-minutes: 10
     steps:
       # Full history, so the script can test that the tagged commit is on main.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -63,24 +73,28 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-latest
             run: false
-          # Ubuntu 22.04 has the oldest glibc (2.35) on a hosted runner, so the
-          # binary runs on more distributions than a 24.04 build would.
+          # glibc builds need glibc 2.39 (Ubuntu 24.04) or newer at run time.
+          # ubuntu-22.04 runners are deprecated (actions/runner-images#14254).
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-22.04
+            os: ubuntu-24.04
             run: true
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-22.04-arm
+            os: ubuntu-24.04-arm
             run: true
-          # Statically linked: runs on any x86_64 Linux, Alpine included.
+          # Statically linked: run on any Linux of that architecture.
           - target: x86_64-unknown-linux-musl
-            os: ubuntu-22.04
+            os: ubuntu-24.04
+            run: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
             run: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       - name: Install the musl C toolchain
         if: endsWith(matrix.target, '-musl')
@@ -103,31 +117,38 @@ jobs:
             "$bin" --demo --snapshot 5 --size 100x30 > "$dir/frame.txt"
           done
           grep -q NEONHIVE "$dir/frame.txt"
-      - uses: actions/upload-artifact@v4
+      # overwrite: "Re-run all jobs" replaces this target's artifact from an
+      # earlier attempt instead of failing on the existing name.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist-${{ matrix.target }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
+          overwrite: true
 
+  # Creates the release as a draft: not public, not "latest", assets not
+  # downloadable by users. It becomes public only in publish-release, after
+  # crates.io. gh finds a draft by its tag (the REST lookup by tag does not
+  # return drafts; gh falls back to a GraphQL lookup of the pending tag).
   github-release:
-    name: github release
+    name: draft github release
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      # All five targets' archives and .sha256 files, from this run.
-      - uses: actions/download-artifact@v4
+      # Every target's archive and .sha256 file, from this run.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: dist-*
           path: dist
           merge-multiple: true
-      - name: Create or update the GitHub Release from CHANGELOG.md
+      - name: Create the draft release, or update an existing one
         env:
           TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -138,11 +159,12 @@ jobs:
           # A suffix such as -rc.1 marks a pre-release.
           flags=()
           [[ "$version" == *-* ]] && flags+=(--prerelease)
-          # Re-running the workflow updates the notes instead of failing.
+          # On a re-run the release exists: update the notes and leave its
+          # draft state alone (only publish-release changes it).
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release edit "$TAG" --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
           else
-            gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
+            gh release create "$TAG" --draft --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md" "${flags[@]}"
           fi
       - name: Upload the archives and checksums
         env:
@@ -158,37 +180,57 @@ jobs:
           # --clobber: a re-run replaces the assets of an earlier attempt.
           gh release upload "$TAG" --clobber ./*.tar.gz ./*.tar.gz.sha256 SHA256SUMS
 
-  # After the release and its binaries are complete: a crates.io version cannot
-  # be replaced, so it comes after every step that might need a fix and a new tag.
+  # After the draft release holds every binary: a crates.io version cannot be
+  # replaced, so it comes after every step that might need a fix and a new tag.
   publish-crate:
     name: publish to crates.io
     needs: github-release
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      # Skips with a notice when the secret is not set; tolerates a version
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: stable
+      # Skips with a notice when the secret is not set (the job still
+      # succeeds, so the release is still published); tolerates a version
       # that is already published.
       - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: scripts/publish-crate.sh
 
-  # Points Formula/neonhive.rb in juanpalopez/homebrew-tap at the new tag.
-  # GITHUB_TOKEN cannot push to another repository, so this uses its own
-  # secret, a token limited to the tap repository. Skips with a notice when the
-  # secret is not set, and for pre-releases. Safe to re-run: an unchanged
-  # formula is not committed again.
-  homebrew-tap:
-    name: update homebrew tap
+  publish-release:
+    name: publish github release
     needs: publish-crate
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - name: Publish the draft release
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        # A no-op on a release that is already published.
+        run: gh release edit "$TAG" --draft=false
+
+  # Points Formula/neonhive.rb in juanpalopez/homebrew-tap at the new tag. Last,
+  # because it pins the checksum of the tag's tarball: the tag must not move
+  # after this. GITHUB_TOKEN cannot push to another repository, so this uses
+  # its own secret, a token limited to the tap repository. Without the secret
+  # it skips with a warning; pre-releases are skipped. Safe to re-run: an
+  # unchanged formula is not committed again.
+  homebrew-tap:
+    name: update homebrew tap
+    needs: publish-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
       - name: Update the formula in the tap

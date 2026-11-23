@@ -73,19 +73,16 @@ cd neonhive
 cargo install --locked --path .
 ```
 
-Without Rust, from the next release on (not available for 0.1.0):
-
-```sh
-# Homebrew (macOS and Linux); builds from source, Homebrew fetches Rust itself
-brew install juanpalopez/tap/neonhive
-```
-
-Or download a prebuilt binary from the
+Without Rust, prebuilt binaries are attached to releases after 0.1.0 (there are none
+for 0.1.0). Download one from the
 [releases page](https://github.com/juanpalopez/neonhive/releases): one
 `neonhive-v<version>-<target>.tar.gz` per platform, for `aarch64-apple-darwin`,
-`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and
-`x86_64-unknown-linux-musl` (static, for any x86_64 Linux). Each archive holds the
-`neonhive` binary, `LICENSE` and `README.md`; `SHA256SUMS` lists their checksums.
+`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`. The `-gnu` builds need
+glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 or later); the `-musl` builds
+are static and run on any Linux, older distributions and Alpine included. Each archive
+holds the `neonhive` binary, `LICENSE` and `README.md`; `SHA256SUMS` lists their
+checksums.
 
 ```sh
 # example: Apple silicon; replace the version and target
@@ -100,6 +97,14 @@ mv "neonhive-v$v-$t/neonhive" ~/.local/bin/    # or any directory on your PATH
 The macOS binaries are not notarized. If Gatekeeper blocks one downloaded with a
 browser, run `xattr -d com.apple.quarantine ~/.local/bin/neonhive` (files fetched with
 `curl` are not quarantined).
+
+Homebrew (macOS and Linux), once the `juanpalopez/homebrew-tap` tap is set up; it is
+not published yet, and this line will say so when it is:
+
+```sh
+# builds from source; Homebrew fetches Rust itself
+brew install juanpalopez/tap/neonhive
+```
 
 ## Usage
 
