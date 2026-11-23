@@ -312,7 +312,7 @@ Two things to know:
 
 | Tool | Sessions read from | Subagents | Tokens | Cost | Limits |
 | --- | --- | --- | --- | --- | --- |
-| Claude Code | `~/.claude/projects/` | Yes, nested, with messages between agents | Input, output, cache read, cache write (5-minute and 1-hour) | Estimated from the built-in Claude price table | Old transcripts are deleted after `cleanupPeriodDays` |
+| Claude Code | `~/.claude/projects/` | Yes, with messages between agents | Input, output, cache read, cache write (5-minute and 1-hour) | Estimated from the built-in Claude price table | Old transcripts are deleted after `cleanupPeriodDays` |
 | OpenAI Codex CLI | `$CODEX_HOME/sessions/` (default `~/.codex/sessions/`), plain `.jsonl` or `.jsonl.zst` | Yes, as threads that name their parent. Not yet tested on a real multi-agent session | Input, output, cached input | A dash: no OpenAI prices built in yet. Add them with `--prices` | Rollouts written in 2025 have no timestamps or token counts, so they replay as one instant with no tokens |
 | Demo (`--demo`) | Built in, scripted | Yes | Yes | Yes | Synthetic data only |
 
