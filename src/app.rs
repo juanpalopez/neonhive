@@ -318,7 +318,8 @@ impl Panel {
     }
 }
 
-/// Default event-stream height in rows, borders included.
+/// Smallest default event-stream height in rows, borders included. Taller
+/// terminals get more: see `default_stream_height`.
 pub const STREAM_H: u16 = 9;
 /// Smallest event stream: two lines of text.
 pub const STREAM_MIN_H: u16 = 4;
@@ -333,9 +334,19 @@ pub const GRAPH_MIN_W: u16 = 60;
 /// Terminals narrower than this show the graph without a side column.
 pub const SIDE_MIN_TERM_W: u16 = 104;
 
-/// Stream height used in a terminal `term_h` rows tall: the preference,
-/// clamped so header, footer and `BODY_MIN_H` rows of graph still fit.
-pub fn stream_height(pref: u16, term_h: u16) -> u16 {
+/// Stream height before the user resizes it: 35% of the rows between header
+/// and footer, and at least `STREAM_H`. A fixed 9 rows left the stream at
+/// seven lines of text however tall the terminal was.
+pub fn default_stream_height(term_h: u16) -> u16 {
+    let share = u32::from(term_h.saturating_sub(2)) * 35 / 100;
+    (share as u16).max(STREAM_H)
+}
+
+/// Stream height used in a terminal `term_h` rows tall: the preference (or
+/// the default when there is none), clamped so header, footer and
+/// `BODY_MIN_H` rows of graph still fit.
+pub fn stream_height(pref: Option<u16>, term_h: u16) -> u16 {
+    let pref = pref.unwrap_or_else(|| default_stream_height(term_h));
     let avail = term_h.saturating_sub(2);
     let max = avail
         .saturating_sub(BODY_MIN_H)
@@ -360,8 +371,10 @@ pub struct Panes {
     /// Preferred event-stream height and side-column width. The size used is
     /// clamped to the terminal (`stream_height`, `side_width`); the key
     /// handlers clamp the preference to the current terminal, and a terminal
-    /// that shrinks and grows back gets the same sizes again.
-    pub stream_h: u16,
+    /// that shrinks and grows back gets the same sizes again. `stream_h` is
+    /// `None` until the user resizes the stream: the height then follows the
+    /// terminal (`default_stream_height`).
+    pub stream_h: Option<u16>,
     pub side_w: u16,
     /// Line number (`World::log_seq` numbering) of the bottom line shown in
     /// the event stream; `None` follows the tail.
@@ -393,7 +406,7 @@ impl Default for Panes {
         Self {
             focus: Panel::Graph,
             maximised: false,
-            stream_h: STREAM_H,
+            stream_h: None,
             side_w: SIDE_W,
             anchor: None,
             paused_at: 0,
@@ -430,7 +443,7 @@ impl App {
     pub fn resize_stream(&mut self, delta: i32) {
         let p = &mut self.panes;
         let now = stream_height(p.stream_h, p.term.1) as i32;
-        p.stream_h = stream_height((now + delta).max(0) as u16, p.term.1);
+        p.stream_h = Some(stream_height(Some((now + delta).max(0) as u16), p.term.1));
     }
 
     pub fn resize_side(&mut self, delta: i32) {
@@ -916,14 +929,23 @@ mod tests {
 
     #[test]
     fn panel_sizes_clamp_to_the_terminal() {
-        assert_eq!(stream_height(STREAM_H, 40), STREAM_H);
-        assert_eq!(stream_height(100, 40), 40 - 2 - BODY_MIN_H);
-        assert_eq!(stream_height(0, 40), STREAM_MIN_H);
+        assert_eq!(stream_height(Some(STREAM_H), 40), STREAM_H);
+        assert_eq!(stream_height(Some(100), 40), 40 - 2 - BODY_MIN_H);
+        assert_eq!(stream_height(Some(0), 40), STREAM_MIN_H);
+        // No preference: the height follows the terminal.
+        assert_eq!(stream_height(None, 24), STREAM_H);
+        assert_eq!(stream_height(None, 40), 13);
+        assert_eq!(stream_height(None, 60), 20);
+        assert_eq!(stream_height(None, 16), 16 - 2 - BODY_MIN_H);
         // The preference outlives a small terminal.
-        assert_eq!(stream_height(20, 16), STREAM_MIN_H.max(16 - 2 - BODY_MIN_H));
-        assert_eq!(stream_height(20, 60), 20);
+        assert_eq!(
+            stream_height(Some(20), 16),
+            STREAM_MIN_H.max(16 - 2 - BODY_MIN_H)
+        );
+        assert_eq!(stream_height(Some(20), 60), 20);
         for h in 0..80 {
-            assert!(stream_height(9, h) <= h.saturating_sub(2), "h={h}");
+            assert!(stream_height(Some(9), h) <= h.saturating_sub(2), "h={h}");
+            assert!(stream_height(None, h) <= h.saturating_sub(2), "h={h}");
         }
         assert_eq!(side_width(SIDE_W, 140), SIDE_W);
         assert_eq!(side_width(500, 140), 140 - GRAPH_MIN_W);

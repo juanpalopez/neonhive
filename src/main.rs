@@ -761,15 +761,15 @@ mod tests {
             press(&mut app, KeyCode::Char(']'));
             press(&mut app, KeyCode::Char('>'));
         }
-        assert_eq!(app.panes.stream_h, 40 - 2 - app::BODY_MIN_H);
+        assert_eq!(app.panes.stream_h, Some(40 - 2 - app::BODY_MIN_H));
         assert_eq!(app.panes.side_w, 140 - app::GRAPH_MIN_W);
         for _ in 0..100 {
             press(&mut app, KeyCode::Char('['));
             press(&mut app, KeyCode::Char('<'));
         }
-        assert_eq!(app.panes.stream_h, app::STREAM_MIN_H);
+        assert_eq!(app.panes.stream_h, Some(app::STREAM_MIN_H));
         assert_eq!(app.panes.side_w, app::SIDE_MIN_W);
         press(&mut app, KeyCode::Char(']'));
-        assert_eq!(app.panes.stream_h, app::STREAM_MIN_H + 1);
+        assert_eq!(app.panes.stream_h, Some(app::STREAM_MIN_H + 1));
     }
 }

@@ -205,7 +205,7 @@ recorded a result for it.
 | `PgUp` `PgDn` | The same, ten agents or a page at a time |
 | `g` `G` or `Home` `End` | Stream: oldest line, back to the newest (follow again). Inspector focused: top, bottom |
 | `z` | Show the focused panel full size, or restore it |
-| `[` `]` | Shorter or taller event stream |
+| `[` `]` | Shorter or taller event stream (starts at about a third of the terminal height) |
 | `<` `>` | Narrower or wider side column (inspector and roster) |
 | `/` | Search the event stream: type, `enter` to keep, `esc` to drop |
 | `n` `N` | Older or newer match |
