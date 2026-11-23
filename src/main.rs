@@ -27,7 +27,11 @@ use ratatui::{DefaultTerminal, Terminal};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Watch Claude Code and Codex agents and subagents interact, live or as a replay.
+/// Watch AI agents and subagents interact in the terminal, live or as a replay.
+///
+/// Reads the session files that agent tools already write to your disk.
+/// Supported today: Claude Code (~/.claude/projects) and OpenAI Codex CLI
+/// ($CODEX_HOME/sessions, default ~/.codex/sessions). Read-only, no network.
 #[derive(Parser)]
 #[command(version, about, args_conflicts_with_subcommands = true)]
 struct Args {
@@ -78,7 +82,7 @@ struct Args {
     #[arg(long, default_value = "140x40", value_name = "WxH")]
     size: String,
     /// JSON file of token prices (USD per million) that replace or extend the
-    /// built-in table used for cost estimates.
+    /// built-in table (Claude models only) used for cost estimates.
     #[arg(long, value_name = "FILE", global = true)]
     prices: Option<PathBuf>,
 }
@@ -87,7 +91,8 @@ struct Args {
 enum Command {
     /// Print a summary of a session as Markdown or JSON, without opening the UI.
     Report {
-        /// Session transcript (.jsonl). Defaults to the most recent session.
+        /// Session transcript (.jsonl, or a Codex .jsonl.zst). Defaults to the most
+        /// recent session.
         session: Option<PathBuf>,
         /// Print JSON instead of Markdown.
         #[arg(long)]
@@ -96,7 +101,8 @@ enum Command {
     /// Follow a session without a UI and print one line per alert: a failed
     /// agent, a looping, erroring or stalled one, a passed budget.
     Watch {
-        /// Session transcript (.jsonl). Defaults to the most recent session.
+        /// Session transcript (.jsonl, or a Codex .jsonl.zst). Defaults to the most
+        /// recent session.
         session: Option<PathBuf>,
         #[command(flatten)]
         opts: watch::Opts,
@@ -895,15 +901,15 @@ mod tests {
             press(&mut app, KeyCode::Char(']'));
             press(&mut app, KeyCode::Char('>'));
         }
-        assert_eq!(app.panes.stream_h, 40 - 2 - app::BODY_MIN_H);
+        assert_eq!(app.panes.stream_h, Some(40 - 2 - app::BODY_MIN_H));
         assert_eq!(app.panes.side_w, 140 - app::GRAPH_MIN_W);
         for _ in 0..100 {
             press(&mut app, KeyCode::Char('['));
             press(&mut app, KeyCode::Char('<'));
         }
-        assert_eq!(app.panes.stream_h, app::STREAM_MIN_H);
+        assert_eq!(app.panes.stream_h, Some(app::STREAM_MIN_H));
         assert_eq!(app.panes.side_w, app::SIDE_MIN_W);
         press(&mut app, KeyCode::Char(']'));
-        assert_eq!(app.panes.stream_h, app::STREAM_MIN_H + 1);
+        assert_eq!(app.panes.stream_h, Some(app::STREAM_MIN_H + 1));
     }
 }

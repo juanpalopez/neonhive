@@ -28,7 +28,7 @@ body:
     id: agent
     attributes:
       label: Agent tool and version
-      placeholder: Claude Code 2.1.x
+      placeholder: Claude Code 2.1.x, Codex CLI 0.x
   - type: input
     id: env
     attributes:

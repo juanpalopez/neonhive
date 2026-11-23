@@ -2,7 +2,8 @@
 
 <p align="center">
   <b>See your AI agents and subagents at work.</b><br>
-  A cyberpunk terminal UI that visualizes agents and subagents: who spawned whom, what each one is doing, how they talk, and what it cost. Live or as a replay.
+  A cyberpunk terminal UI that visualizes agents and subagents: who spawned whom, what each one is doing, how they talk, and what it cost. Live or as a replay.<br>
+  Works with Claude Code and OpenAI Codex CLI today. More agent tools are planned.
 </p>
 
 <p align="center">
@@ -13,7 +14,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/demo.svg" alt="neonhive showing a swarm of AI subagents as an animated graph in the terminal" width="100%">
+  <img src="docs/demo.gif" alt="Recording of neonhive --demo: a main agent spawns subagents that run tools and send messages while tokens and cost climb; a subagent is selected, the graph is shown full size, and a search of the event stream finds a loop flag" width="100%">
 </p>
 
 When a coding agent fans out into ten subagents, the terminal shows you one spinner.
@@ -21,9 +22,12 @@ neonhive shows you the swarm. Every agent and subagent is a node. Every spawn, m
 and result is a pulse travelling along an edge. Every tool call scrolls past in an
 event stream. Select any agent to see its task, its model, its tokens and its cost.
 
-It works with [Claude Code](https://claude.com/claude-code) and the OpenAI
-[Codex CLI](https://github.com/openai/codex). The core knows nothing about any one
-agent tool, so others can be added with a single adapter.
+neonhive is not tied to one agent tool. It reads the session files that
+[Claude Code](https://claude.com/claude-code) and the OpenAI
+[Codex CLI](https://github.com/openai/codex) write to your disk, and the core knows
+nothing about either of them. Each tool is one source adapter, so adding another
+does not touch the UI. See [Supported agent tools](#supported-agent-tools) for what
+each one shows.
 
 Try it in ten seconds, no agent sessions needed:
 
@@ -90,8 +94,8 @@ A session that was written to in the last two minutes opens **live** and follows
 new activity. An older session opens as a **replay** from its start. Force either with
 `--live` or `--replay`, and set the replay speed with `--speed 32`.
 
-Start Claude Code in one terminal, run `neonhive --latest` in another, and ask Claude
-to do something that uses subagents.
+Start your agent tool (Claude Code or Codex) in one terminal, run `neonhive --latest`
+in another, and give the agent a task that uses subagents.
 
 ### Presenting a session
 
@@ -227,7 +231,7 @@ recorded a result for it.
 | `PgUp` `PgDn` | The same, ten agents or a page at a time |
 | `g` `G` or `Home` `End` | Stream: oldest line, back to the newest (follow again). Inspector focused: top, bottom |
 | `z` | Show the focused panel full size, or restore it |
-| `[` `]` | Shorter or taller event stream |
+| `[` `]` | Shorter or taller event stream (starts at about a third of the terminal height) |
 | `<` `>` | Narrower or wider side column (inspector and roster) |
 | `/` | Search the event stream: type, `enter` to keep, `esc` to drop |
 | `n` `N` | Older or newer match |
@@ -316,10 +320,13 @@ read the file before you share it.
 
 ## How it works
 
+Agent tools already record their sessions on disk. A source adapter for each tool
+tails those files, turns each line into a small normalized event (spawn, tool call,
+message, finish), and feeds the events to a renderer that knows nothing about the
+tool they came from.
+
 Claude Code records every session as JSON Lines under `~/.claude/projects/`. Each
-subagent gets its own transcript beside the main one. neonhive tails those files,
-turns each line into a small normalized event (spawn, tool call, message, finish),
-and feeds the events to a renderer that knows nothing about Claude Code.
+subagent gets its own transcript beside the main one.
 
 Codex CLI writes one "rollout" file per thread under
 `~/.codex/sessions/YYYY/MM/DD/` (or `$CODEX_HOME/sessions`), and compresses files idle
@@ -340,11 +347,16 @@ Two things to know:
 
 ## Supported agent tools
 
-| Tool | Status |
-| --- | --- |
-| Claude Code | Supported |
-| OpenAI Codex CLI | Supported: sessions, prompts, tool calls, errors and tokens. Subagent threads are read as Codex's source code describes them, but have not been tested on a real multi-agent session yet. No cost estimate yet. Rollouts written in 2025 have no timestamps or token counts, so they replay as one instant with no tokens. |
-| Others (Gemini CLI, OpenCode, LangGraph, OpenTelemetry traces) | Open to contributions |
+| Tool | Sessions read from | Subagents | Tokens | Cost | Limits |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code | `~/.claude/projects/` | Yes, with messages between agents | Input, output, cache read, cache write (5-minute and 1-hour) | Estimated from the built-in Claude price table | Old transcripts are deleted after `cleanupPeriodDays` |
+| OpenAI Codex CLI | `$CODEX_HOME/sessions/` (default `~/.codex/sessions/`), plain `.jsonl` or `.jsonl.zst` | Yes, as threads that name their parent. Not yet tested on a real multi-agent session | Input, output, cached input | A dash: no OpenAI prices built in yet. Add them with `--prices` | Rollouts written in 2025 have no timestamps or token counts, so they replay as one instant with no tokens |
+| Demo (`--demo`) | Built in, scripted | Yes | Yes | Yes | Synthetic data only |
+
+More adapters (Gemini CLI, OpenCode, LangGraph, OpenTelemetry traces) are planned
+in [issue #2](https://github.com/juanpalopez/neonhive/issues/2) and open to
+contributions. An adapter implements one trait; see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## Roadmap
 
@@ -355,7 +367,6 @@ Planned work is tracked as issues on the [roadmap board](https://github.com/user
 - Timeline scrubbing and jump-to-error in replays
 - Compare two sessions
 - Audit trail: commands run and files touched, per agent
-- `neonhive watch`: headless alerts when an agent fails, loops or passes a budget
 - Zoom and pan for very wide swarms
 - Themes
 - Prebuilt binaries and Homebrew
@@ -374,8 +385,8 @@ No. There is no network code in neonhive.
 **Which terminals work?**
 Any terminal with Unicode and at least 256 colours, 60x16 cells or larger. It looks best at 140x40 or more with 24-bit colour: iTerm2, Ghostty, Kitty, WezTerm, Alacritty, Windows Terminal. If colours look wrong, try `--ansi256`.
 
-**Can I use it with agents other than Claude Code?**
-Yes, with the OpenAI Codex CLI: its sessions appear in the same list. For other tools, the core is tool-agnostic and an adapter is a few hundred lines; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Contributions are welcome.
+**Which agent tools does it work with?**
+Claude Code and the OpenAI Codex CLI today. Sessions from both appear in the same list. The core is tool-agnostic, so other tools need only an adapter; see [Supported agent tools](#supported-agent-tools) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Contributions are welcome.
 
 ## Contributing
 
