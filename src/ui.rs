@@ -512,19 +512,39 @@ fn draw_graph(buf: &mut Buffer, area: Rect, app: &mut App) {
             fg(fx::DIM),
         );
     }
-    // Agents outside the visible set; `nodes` also holds the ones fading out.
-    let off_screen = app.hidden;
-    if off_screen > 0 {
-        let msg = format!(" +{off_screen} archived ");
-        let x = inner.right().saturating_sub(msg.chars().count() as u16);
-        buf.set_stringn(
-            x,
-            inner.bottom() - 1,
-            &msg,
-            inner.width as usize,
-            fg(fx::DIM),
-        );
+    // Agents outside the visible set (`nodes` also holds the ones fading
+    // out), and how many of them are flagged.
+    let (count, flags) = archived_label(app.hidden, app.hidden_flagged, inner.width as usize);
+    let width = (count.chars().count() + flags.chars().count()) as u16;
+    let x = inner.right().saturating_sub(width);
+    let y = inner.bottom() - 1;
+    let (x, _) = buf.set_stringn(x, y, &count, inner.width as usize, fg(fx::DIM));
+    buf.set_stringn(x, y, &flags, inner.width as usize, bold(fx::ORANGE));
+}
+
+/// The "+N archived" label in two parts, count and flags, shortened to fit
+/// `width` cells: " +54 archived · 3 ▲ ", then " +54 · 3 ▲ ", then " 3 ▲ ".
+/// Flags outlast the count, since nothing else may show them on a small
+/// screen. Both parts are empty when there is nothing to say or no room.
+fn archived_label(hidden: usize, flagged: usize, width: usize) -> (String, String) {
+    let flags = |sep: &str| match flagged {
+        0 => String::new(),
+        n => format!("{sep}{n} {HEALTH_GLYPH} "),
+    };
+    if hidden == 0 {
+        return (String::new(), String::new());
     }
+    let mut tries = vec![
+        (format!(" +{hidden} archived "), flags("· ")),
+        (format!(" +{hidden} "), flags("· ")),
+    ];
+    if flagged > 0 {
+        tries.push((" ".to_string(), flags("")));
+    }
+    tries
+        .into_iter()
+        .find(|(c, f)| c.chars().count() + f.chars().count() <= width)
+        .unwrap_or_default()
 }
 
 /// The flag part of a node's bottom row, at most `budget` cells: "loop x12"
@@ -1366,6 +1386,42 @@ mod tests {
             text.contains(&format!("+{hidden} archived")),
             "want +{hidden} archived:\n{text}"
         );
+    }
+
+    #[test]
+    fn archived_label_shortens_and_keeps_flags() {
+        let join = |(c, f): (String, String)| c + &f;
+        assert_eq!(join(archived_label(54, 3, 80)), " +54 archived · 3 ▲ ");
+        assert_eq!(join(archived_label(54, 0, 80)), " +54 archived ");
+        assert_eq!(join(archived_label(54, 3, 12)), " +54 · 3 ▲ ");
+        assert_eq!(join(archived_label(54, 3, 5)), " 3 ▲ ");
+        assert_eq!(join(archived_label(54, 0, 5)), " +54 ");
+        assert_eq!(join(archived_label(54, 3, 2)), "");
+        assert_eq!(join(archived_label(0, 0, 80)), "");
+        for w in 0..30 {
+            let s = join(archived_label(1234, 56, w));
+            assert!(s.chars().count() <= w, "{w}: {s:?}");
+        }
+    }
+
+    #[test]
+    fn small_graph_counts_hidden_flags() {
+        // 150 agents with every tenth looping; at 80x24 most flags are off
+        // the graph and the header has no room for its flag count.
+        let mut app = crowded_app(150);
+        frame(&mut app, 80, 24);
+        app.tick(1.0 / 30.0);
+        let text = frame(&mut app, 80, 24);
+        assert!(app.hidden_flagged > 0);
+        assert!(!text.contains("FLAGGED"), "{text}");
+        let want = format!("+{} archived · {} ▲", app.hidden, app.hidden_flagged);
+        assert!(text.contains(&want), "want {want}:\n{text}");
+        // Healthy running agents still get a node.
+        let healthy = app.nodes.keys().filter(|id| {
+            let a = &app.world.agents[*id];
+            *id != ROOT && a.status == Status::Running && !a.health.flag().is_flagged()
+        });
+        assert!(healthy.count() >= 1, "{text}");
     }
 
     #[test]

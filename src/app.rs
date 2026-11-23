@@ -62,7 +62,9 @@ pub struct App {
     pub view: (u16, u16),
     /// Node box width in cells, chosen from how crowded the graph is.
     pub box_w: u16,
+    /// Agents not on the graph, and how many of them are flagged.
     pub hidden: usize,
+    pub hidden_flagged: usize,
     pub help: bool,
     /// The roster panel shows cost by agent type instead of agents.
     pub cost_view: bool,
@@ -96,6 +98,7 @@ impl App {
             view: (100, 30),
             box_w: 24,
             hidden: 0,
+            hidden_flagged: 0,
             help: false,
             cost_view: false,
             panes: Panes::default(),
@@ -248,13 +251,16 @@ impl App {
         let pinned = (!self.follow)
             .then(|| self.world.order.get(self.selected))
             .flatten();
-        let visible = choose_visible(&self.world, cap, pinned.map(String::as_str));
+        let bound = node_bound(self.view);
+        let visible = choose_visible(&self.world, cap, bound, pinned.map(String::as_str));
         self.hidden = self.world.order.len() - visible.len();
-        self.box_w = match visible.len() {
-            0..=6 => 24,
-            7..=10 => 20,
-            _ => 16,
-        };
+        self.hidden_flagged = self
+            .world
+            .agents
+            .values()
+            .filter(|a| a.health.flag().is_flagged() && !visible.contains(&a.id))
+            .count();
+        self.box_w = box_width(visible.len());
         let space = Space::new(self.view, self.box_w);
         let targets = layout(&self.world, &visible, &space);
         let ease = 1.0 - (-dt as f32 * 6.0).exp();
@@ -649,25 +655,46 @@ impl App {
     }
 }
 
+/// Node box width in cells for a graph of `n` nodes.
+pub fn box_width(n: usize) -> u16 {
+    match n {
+        0..=6 => 24,
+        7..=10 => 20,
+        _ => 16,
+    }
+}
+
 /// Pick which agents get a node, each with its ancestors, in this order:
 ///
 /// 1. the root;
 /// 2. `pinned` (the agent the user selected), then every flagged agent in
-///    spawn order. These do not wait for a slot, so the graph can hold more
-///    than `cap` picks, but never more than `2 * cap + 1` nodes: a pinned or
-///    flagged agent whose chain would pass that bound is left off (it still
-///    counts as archived, and the header still counts its flag);
-/// 3. up to `cap` picks in all: running agents that are not idle, oldest
-///    spawn first, then the others, most recently active first.
+///    spawn order. They do not wait for one of the `cap` picks, but when
+///    `bound` is 3 or more they leave room for one more node, so a healthy
+///    agent can still show;
+/// 3. the rest of the `cap` picks (at least one): running agents that are
+///    not idle, where a third of the picks (at least one, when there are two
+///    or more) go to the most recently spawned and the others to the oldest
+///    spawned; then the other agents, most recently active first.
 ///
-/// Running agents are ordered by spawn, not by their last event, so that
-/// with more of them than slots the set changes only when one starts or
-/// finishes, not on every tool call. The oldest running agents keep their
-/// slots until they finish.
-pub fn choose_visible(world: &World, cap: usize, pinned: Option<&str>) -> Vec<String> {
-    let bound = 2 * cap + 1;
+/// Only picks of step 2 that made it into the set count against `cap`. No
+/// chain is added that would take the set past `bound` nodes (see
+/// [`node_bound`]), so every node can be drawn clear of the others; a pinned
+/// or flagged agent left off that way counts as archived, and the archived
+/// label counts its flag.
+///
+/// Running agents are ranked by spawn, not by their last event, so with more
+/// of them than picks the set changes when one starts, finishes or goes
+/// idle, never on a tool call. Splitting the picks between the oldest and
+/// the newest keeps long-lived agents from holding every slot.
+pub fn choose_visible(
+    world: &World,
+    cap: usize,
+    bound: usize,
+    pinned: Option<&str>,
+) -> Vec<String> {
     let mut ids: Vec<String> = vec![ROOT.to_string()];
-    // `id` and the ancestors not yet shown, if they all fit within `limit`.
+    // Add `id` and the ancestors not yet shown if they all fit within
+    // `limit`; true when `id` is in the set afterwards.
     let add = |ids: &mut Vec<String>, id: &str, limit: usize| {
         let mut chain = Vec::new();
         let mut cur = Some(id.to_string());
@@ -678,9 +705,11 @@ pub fn choose_visible(world: &World, cap: usize, pinned: Option<&str>) -> Vec<St
             cur = world.agents.get(&id).and_then(|x| x.parent.clone());
             chain.push(id);
         }
-        if ids.len() + chain.len() <= limit {
-            ids.extend(chain);
+        if ids.len() + chain.len() > limit {
+            return false;
         }
+        ids.extend(chain);
+        true
     };
 
     let mut flagged: Vec<_> = world
@@ -699,23 +728,38 @@ pub fn choose_visible(world: &World, cap: usize, pinned: Option<&str>) -> Vec<St
                 .filter(|id| Some(*id) != pinned),
         )
         .collect();
+    // Leave one node for a healthy agent, unless that is all there is.
+    let must_limit = if bound >= 3 { bound - 1 } else { bound };
+    let mut shown = 0;
     for id in &must {
-        add(&mut ids, id, bound);
+        shown += usize::from(add(&mut ids, id, must_limit));
     }
 
-    let mut subs: Vec<_> = world
+    let (mut running, mut others): (Vec<_>, Vec<_>) = world
         .agents
         .values()
         .filter(|a| a.id != ROOT && !must.contains(&a.id.as_str()))
-        .collect();
-    subs.sort_by_key(|a| {
-        let active = a.status == Status::Running && !world.is_idle(a);
-        let recent = if active { 0 } else { a.last_ts };
-        (!active, std::cmp::Reverse(recent), a.order)
-    });
-    let picks = cap.saturating_sub(must.len());
-    for a in subs.into_iter().take(picks) {
-        add(&mut ids, &a.id, bound);
+        .partition(|a| a.status == Status::Running && !world.is_idle(a));
+    running.sort_by_key(|a| a.order);
+    others.sort_by_key(|a| (std::cmp::Reverse(a.last_ts), a.order));
+
+    let picks = cap.saturating_sub(shown).max(1);
+    let mut ranked: Vec<&str> = Vec::new();
+    if running.len() > picks {
+        let newest = if picks >= 2 { (picks / 3).max(1) } else { 0 };
+        let oldest = picks - newest;
+        ranked.extend(running[..oldest].iter().map(|a| a.id.as_str()));
+        ranked.extend(
+            running[running.len() - newest..]
+                .iter()
+                .map(|a| a.id.as_str()),
+        );
+    } else {
+        ranked.extend(running.iter().map(|a| a.id.as_str()));
+        ranked.extend(others.iter().map(|a| a.id.as_str()));
+    }
+    for id in ranked.into_iter().take(picks) {
+        add(&mut ids, id, bound);
     }
     ids.sort_by_key(|id| world.agents.get(id).map(|a| a.order).unwrap_or(0));
     ids
@@ -727,6 +771,8 @@ pub struct Space {
     pub rx: f32,
     pub ry: f32,
     pub box_w: f32,
+    /// Panel size in cells.
+    pub view: (u16, u16),
 }
 
 pub const BOX_H: f32 = 3.0;
@@ -737,8 +783,63 @@ impl Space {
             rx: ((view.0 as f32 - box_w as f32) / 2.0 - 1.0).max(1.0),
             ry: ((view.1 as f32 - BOX_H) / 2.0 - 0.5).max(1.0),
             box_w: box_w as f32,
+            view,
         }
     }
+
+    /// Top-left cell of a box centred at `(x, y)` cells from the panel
+    /// centre, clamped into the panel the way `ui` draws it.
+    fn cell(&self, (x, y): (f32, f32)) -> (i32, i32) {
+        let (w, h) = (self.view.0 as f32, self.view.1 as f32);
+        let bw = self.box_w;
+        let left = (w / 2.0 + x - bw / 2.0).round() as i32;
+        let top = (h / 2.0 + y - BOX_H / 2.0).round() as i32;
+        (
+            left.clamp(0, (w - bw).max(0.0) as i32),
+            top.clamp(0, (h - BOX_H).max(0.0) as i32),
+        )
+    }
+
+    /// Whether boxes at these two cells share a cell.
+    fn overlap(&self, a: (i32, i32), b: (i32, i32)) -> bool {
+        (a.0 - b.0).abs() < self.box_w as i32 && (a.1 - b.1).abs() < BOX_H as i32
+    }
+
+    /// Box centres, in cells from the panel centre, of a grid where no two
+    /// boxes share a cell and the middle one is the root's: columns
+    /// `box_w + 2` apart and rows `BOX_H + 1` apart, the outermost pulled in
+    /// to the panel edge when there is room for the box but not the gap.
+    pub fn slots(&self) -> Vec<(f32, f32)> {
+        let axis = |r: f32, size: f32, step: f32| -> Vec<f32> {
+            let side = if r >= size {
+                ((r - size) / step) as usize + 1
+            } else {
+                0
+            };
+            let mut at = vec![0.0];
+            for k in 1..=side {
+                let d = (k as f32 * step).min(r);
+                at.push(d);
+                at.push(-d);
+            }
+            at
+        };
+        let xs = axis(self.rx, self.box_w, self.box_w + 2.0);
+        let ys = axis(self.ry, BOX_H, BOX_H + 1.0);
+        ys.iter()
+            .flat_map(|&y| xs.iter().map(move |&x| (x, y)))
+            .collect()
+    }
+}
+
+/// Most nodes a graph panel of `view` cells can show with no two boxes
+/// sharing a cell, at the box width that many nodes get: the number of
+/// [`Space::slots`], counting up until a count does not fit (boxes narrow
+/// as the count grows, so a larger count can fit where a smaller one does
+/// not). At least 1, the root.
+pub fn node_bound(view: (u16, u16)) -> usize {
+    let fits = |n: usize| n <= Space::new(view, box_width(n)).slots().len();
+    (2..=64).take_while(|&n| fits(n)).last().unwrap_or(1)
 }
 
 /// Radial tree layout, then overlap removal. Returns a position per visible
@@ -790,7 +891,59 @@ pub fn layout(world: &World, visible: &[String], space: &Space) -> HashMap<Strin
     out.insert(ROOT.to_string(), (0.0, 0.0));
     place(ROOT, &children, (-FRAC_PI_2, TAU), 1, &mut out);
     separate(visible, &mut out, space);
+    settle(visible, &mut out, space);
     out
+}
+
+/// Move every box that still shares cells with an earlier one to the
+/// nearest free grid slot, so up to [`node_bound`] nodes never hide each
+/// other. `separate` alone can leave a box under another when the panel is
+/// tight: it pushes along one axis into the clamp and stops. If a box finds
+/// no free slot (boxes left between slots block them), every box but the
+/// root is snapped to a slot instead, which always fits `node_bound` boxes.
+fn settle(order: &[String], pos: &mut HashMap<String, (f32, f32)>, space: &Space) {
+    let slots = space.slots();
+    for snap_all in [false, true] {
+        let mut out = pos.clone();
+        let mut placed: Vec<(i32, i32)> = Vec::new();
+        let mut stuck = false;
+        for id in order {
+            let Some(&(nx, ny)) = pos.get(id) else {
+                continue;
+            };
+            let at = (nx * space.rx, ny * space.ry);
+            let cell = space.cell(at);
+            let clear = !placed.iter().any(|&p| space.overlap(p, cell));
+            if id == ROOT || (clear && !snap_all) {
+                placed.push(cell);
+                continue;
+            }
+            let free = slots
+                .iter()
+                .filter(|&&s| {
+                    let c = space.cell(s);
+                    !placed.iter().any(|&p| space.overlap(p, c))
+                })
+                .min_by(|a, b| {
+                    let d = |s: &(f32, f32)| (s.0 - at.0).powi(2) + ((s.1 - at.1) * 2.0).powi(2);
+                    d(a).total_cmp(&d(b))
+                });
+            match free {
+                Some(&s) => {
+                    placed.push(space.cell(s));
+                    out.insert(id.clone(), (s.0 / space.rx, s.1 / space.ry));
+                }
+                None => {
+                    stuck = true;
+                    placed.push(cell);
+                }
+            }
+        }
+        if !stuck || snap_all {
+            *pos = out;
+            return;
+        }
+    }
 }
 
 /// Push overlapping boxes apart, in cell space. The root stays centred.
@@ -886,7 +1039,7 @@ mod tests {
                 };
                 spawn(&mut world, &format!("a{i}"), &parent, i as i64);
             }
-            let visible = choose_visible(&world, 16, None);
+            let visible = choose_visible(&world, 16, 64, None);
             let space = Space::new((150, 44), 16);
             let pos = layout(&world, &visible, &space);
             assert_eq!(pos[ROOT], (0.0, 0.0));
@@ -921,7 +1074,7 @@ mod tests {
         }
         // The only running agent, under a finished one.
         spawn(&mut world, "child", "a0", 100);
-        let visible = choose_visible(&world, 5, None);
+        let visible = choose_visible(&world, 5, 64, None);
         assert!(visible.contains(&ROOT.to_string()));
         assert!(visible.contains(&"child".to_string()));
         assert!(
@@ -964,7 +1117,7 @@ mod tests {
     #[test]
     fn flagged_agent_and_its_ancestors_stay_visible() {
         let mut world = crowded();
-        assert!(!has(&choose_visible(&world, 5, None), "f"));
+        assert!(!has(&choose_visible(&world, 5, 64, None), "f"));
         // Four identical calls in a row: a loop.
         for t in 0..4 {
             tool(&mut world, "f", 999, 200 + t);
@@ -974,26 +1127,26 @@ mod tests {
             tool(&mut world, &format!("a{i}"), 1000 + i as u64, 300 + i);
         }
         assert!(world.health(&world.agents["f"]).is_flagged());
-        let visible = choose_visible(&world, 5, None);
+        let visible = choose_visible(&world, 5, 64, None);
         assert!(has(&visible, "f"), "flagged agent hidden: {visible:?}");
         assert!(has(&visible, "p"), "its parent must show too");
         assert!(has(&visible, ROOT));
-        assert!(!has(&visible, "late"));
-        assert!(visible.len() <= 2 * 5 + 1);
+        // The newest running agent keeps its reserved pick.
+        assert!(has(&visible, "late"), "{visible:?}");
     }
 
     #[test]
     fn selected_agent_and_its_ancestors_stay_visible() {
         let world = crowded();
-        let visible = choose_visible(&world, 5, Some("f"));
+        let visible = choose_visible(&world, 5, 64, Some("f"));
         assert!(has(&visible, "f"), "selected agent hidden: {visible:?}");
         assert!(has(&visible, "p"));
         assert!(has(&visible, ROOT));
         // The pin takes one of the cap's picks.
         assert_eq!(visible.len(), 1 + 2 + 4);
         // The root and unknown ids pin nothing.
-        assert_eq!(choose_visible(&world, 5, Some(ROOT)).len(), 1 + 5);
-        assert_eq!(choose_visible(&world, 5, Some("nope")).len(), 1 + 5);
+        assert_eq!(choose_visible(&world, 5, 64, Some(ROOT)).len(), 1 + 5);
+        assert_eq!(choose_visible(&world, 5, 64, Some("nope")).len(), 1 + 5);
     }
 
     #[test]
@@ -1005,11 +1158,13 @@ mod tests {
                 tool(&mut world, &format!("a{i}"), 7, 100 + i * 10 + t);
             }
         }
+        spawn(&mut world, "healthy", ROOT, 500);
         assert_eq!(world.flagged(), 20);
-        let visible = choose_visible(&world, 3, Some("a19"));
-        assert_eq!(visible.len(), 2 * 3 + 1, "{visible:?}");
-        // The selection first, then flagged agents oldest first.
-        for id in ["a19", "a0", "a1", "a2", "a3", "a4"] {
+        let visible = choose_visible(&world, 3, 7, Some("a19"));
+        assert_eq!(visible.len(), 7, "{visible:?}");
+        // The selection first, then flagged agents oldest first, and one node
+        // left for a healthy running agent.
+        for id in ["a19", "a0", "a1", "a2", "a3", "healthy"] {
             assert!(has(&visible, id), "{id} missing: {visible:?}");
         }
     }
@@ -1020,16 +1175,21 @@ mod tests {
         for i in 0..40 {
             spawn(&mut world, &format!("a{i}"), ROOT, i);
         }
-        let before = choose_visible(&world, 10, None);
+        let before = choose_visible(&world, 10, 64, None);
         assert_eq!(before.len(), 11);
         // The newest agents act most, which used to pull them in.
         for round in 0..3 {
             for i in (0..40).rev() {
                 let ts = 1000 + round * 100 + (40 - i);
                 tool(&mut world, &format!("a{i}"), (round * 100 + i) as u64, ts);
-                assert_eq!(choose_visible(&world, 10, None), before, "a{i}");
+                assert_eq!(choose_visible(&world, 10, 64, None), before, "a{i}");
             }
         }
+        // Seven picks for the oldest running agents, three for the newest.
+        let want: Vec<String> = std::iter::once(ROOT.to_string())
+            .chain([0, 1, 2, 3, 4, 5, 6, 37, 38, 39].map(|i| format!("a{i}")))
+            .collect();
+        assert_eq!(before, want);
         // A finish frees a slot for the next running agent by spawn order.
         let kind = Kind::Finish {
             id: "a0".into(),
@@ -1037,8 +1197,108 @@ mod tests {
             tokens: None,
         };
         world.apply(&Event { ts: 2000, kind }, false);
-        let after = choose_visible(&world, 10, None);
-        assert!(!has(&after, "a0") && has(&after, "a10"), "{after:?}");
+        let after = choose_visible(&world, 10, 64, None);
+        assert!(!has(&after, "a0") && has(&after, "a7"), "{after:?}");
+    }
+
+    #[test]
+    fn long_lived_agents_do_not_hold_every_slot() {
+        let mut world = World::new("root");
+        // Ten agents that run all session, then 30 short ones in turn.
+        for i in 0..10 {
+            spawn(&mut world, &format!("long{i}"), ROOT, i);
+        }
+        let mut seen = std::collections::HashSet::new();
+        for j in 0..30 {
+            let id = format!("short{j}");
+            spawn(&mut world, &id, ROOT, 100 + j * 10);
+            for i in 0..10 {
+                tool(
+                    &mut world,
+                    &format!("long{i}"),
+                    j as u64 * 100 + i,
+                    101 + j * 10,
+                );
+            }
+            let visible = choose_visible(&world, 10, 64, None);
+            assert!(has(&visible, &id), "short{j} never shows: {visible:?}");
+            seen.extend(visible);
+            let kind = Kind::Finish {
+                id,
+                ok: true,
+                tokens: None,
+            };
+            world.apply(
+                &Event {
+                    ts: 105 + j * 10,
+                    kind,
+                },
+                false,
+            );
+        }
+        assert!(seen.len() >= 1 + 7 + 30, "{}", seen.len());
+    }
+
+    struct NoEvents;
+
+    impl Source for NoEvents {
+        fn poll(&mut self) -> Vec<Event> {
+            Vec::new()
+        }
+    }
+
+    /// Cell rectangles of the nodes not fading out, placed as `ui` draws
+    /// them.
+    fn boxes(app: &App) -> Vec<(String, i32, i32)> {
+        let space = Space::new(app.view, app.box_w);
+        let (w, h) = (app.view.0 as f32, app.view.1 as f32);
+        let bw = app.box_w as i32;
+        app.nodes
+            .iter()
+            .filter(|(_, n)| n.dying.is_none())
+            .map(|(id, n)| {
+                let x = ((w / 2.0 + n.x * space.rx - bw as f32 / 2.0).round() as i32)
+                    .clamp(0, (w as i32 - bw).max(0));
+                let y = ((h / 2.0 + n.y * space.ry - 1.5).round() as i32)
+                    .clamp(0, (h as i32 - 3).max(0));
+                (id.clone(), x, y)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn must_show_boxes_never_overlap() {
+        // Every fourth agent loops; graph panels of 80x24, 100x30 and
+        // 140x40 terminals and a few others.
+        for view in [(78, 11), (58, 13), (98, 16), (98, 24), (158, 38), (30, 8)] {
+            let mut app = App::new(Box::new(NoEvents), Mode::Replay, "root", "t");
+            for i in 0..60 {
+                spawn(&mut app.world, &format!("a{i}"), ROOT, i);
+                let calls = if i % 4 == 0 { 4 } else { 1 };
+                for c in 0..calls {
+                    let key = if calls > 1 { 7 } else { 100 + i as u64 };
+                    tool(&mut app.world, &format!("a{i}"), key, 100 + i * 10 + c);
+                }
+            }
+            app.follow = false;
+            app.selected = app.world.agents["a59"].order;
+            app.view = view;
+            for _ in 0..120 {
+                app.tick(1.0 / 30.0);
+            }
+            let shown = boxes(&app);
+            assert!(shown.len() <= node_bound(view), "{view:?}");
+            if node_bound(view) >= 2 {
+                assert!(shown.iter().any(|b| b.0 == "a59"), "{view:?}: pin missing");
+            }
+            let bw = app.box_w as i32;
+            for (i, a) in shown.iter().enumerate() {
+                for b in &shown[i + 1..] {
+                    let apart = (a.1 - b.1).abs() >= bw || (a.2 - b.2).abs() >= BOX_H as i32;
+                    assert!(apart, "{view:?}: {} and {} overlap", a.0, b.0);
+                }
+            }
+        }
     }
 
     #[test]
