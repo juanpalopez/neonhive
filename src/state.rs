@@ -215,6 +215,25 @@ impl World {
         }
     }
 
+    /// Sweep health at every moment before `until` at which a running agent
+    /// passes its stall limit, as a clock moving towards `until` would, but
+    /// never earlier than `floor`: a replay skips dead time and first looks
+    /// again at `floor`. For a world rebuilt from events without the clock.
+    pub fn sweep_stalls_until(&mut self, until: i64, floor: i64) {
+        loop {
+            let next = self
+                .agents
+                .values()
+                .filter(|a| a.status == Status::Running && a.health.flag() != Health::Stalled)
+                .map(|a| (a.last_ts + health::stall_limit(&a.health) + 1).max(floor))
+                .filter(|&t| t > self.now_ts && t < until)
+                .min();
+            let Some(t) = next else { break };
+            self.now_ts = t;
+            self.sweep_health();
+        }
+    }
+
     /// Re-check one agent after an event of its own.
     fn note_health(&mut self, id: &str, ts: i64) {
         let Some(a) = self.agents.get(id) else {
@@ -309,7 +328,7 @@ impl World {
     }
 
     /// Resolve a message recipient given as id, id prefix, label or type.
-    fn resolve(&self, to: &str) -> Option<String> {
+    pub fn resolve(&self, to: &str) -> Option<String> {
         if self.agents.contains_key(to) {
             return Some(to.to_string());
         }
