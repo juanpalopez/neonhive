@@ -1,4 +1,5 @@
 mod app;
+mod caption;
 mod claude;
 mod codex;
 mod demo;
@@ -53,14 +54,26 @@ struct Args {
     #[arg(long)]
     ansi256: bool,
     /// Print one frame as text after this many seconds of replay, then exit.
-    #[arg(long, value_name = "SECONDS")]
+    /// With --svg and --to: where the exported animation starts.
+    #[arg(long, visible_alias = "from", value_name = "SECONDS")]
     snapshot: Option<f64>,
     /// With --snapshot: write the frame to this SVG file instead of stdout.
     #[arg(long, value_name = "FILE", requires = "snapshot")]
     svg: Option<PathBuf>,
     /// With --svg: number of frames in a looping animated SVG.
-    #[arg(long, default_value_t = 1, requires = "svg")]
+    #[arg(long, default_value_t = 1, requires = "svg", conflicts_with = "to")]
     frames: usize,
+    /// With --svg: export an animation from --from (or --snapshot) to this
+    /// many seconds of replay.
+    #[arg(long, value_name = "SECONDS", requires = "svg")]
+    to: Option<f64>,
+    /// With --svg: frames per second of an animated SVG, 1 to 30. Fewer
+    /// frames make a smaller file.
+    #[arg(long, default_value_t = 5, requires = "svg", value_parser = clap::value_parser!(u32).range(1..=30))]
+    fps: u32,
+    /// Start with captions on: a plain-language line about each event.
+    #[arg(long)]
+    captions: bool,
     /// Frame size for --snapshot.
     #[arg(long, default_value = "140x40", value_name = "WxH")]
     size: String,
@@ -160,6 +173,7 @@ fn open(path: &Path, info: Option<&SessionInfo>, args: &Args) -> App {
             .unwrap_or_default(),
     };
     let mut app = App::new(source(path), mode, &project, &title);
+    app.captions = args.captions;
     app.speed_idx = SPEEDS
         .iter()
         .position(|s| *s >= args.speed)
@@ -285,12 +299,17 @@ fn watch_loop(session: Option<&Path>, opts: &watch::Opts) -> anyhow::Result<i32>
 
 fn demo() -> App {
     let source = Box::new(demo::DemoSource::new(7));
-    App::new(source, Mode::Live, "demo", "demo // synthetic agent swarm")
+    let mut app = App::new(source, Mode::Live, "demo", "demo // synthetic agent swarm");
+    // The demo is scripted, so it can pause and step like a replay.
+    app.pausable = true;
+    app
 }
 
 fn run(term: &mut DefaultTerminal, args: &Args) -> anyhow::Result<()> {
     if args.demo {
-        view(term, demo())?;
+        let mut app = demo();
+        app.captions = args.captions;
+        view(term, app)?;
         return Ok(());
     }
     let sessions = all_sessions();
@@ -430,7 +449,14 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Flow {
         KeyCode::Char('&') => app.panes.filter = !app.panes.filter,
         KeyCode::Char('f') => app.follow = !app.follow,
         KeyCode::Char('c') => app.cost_view = !app.cost_view,
-        KeyCode::Char(' ') => app.paused = !app.paused,
+        KeyCode::Char(' ') => app.toggle_pause(),
+        KeyCode::Char('.') => {
+            app.step_forward();
+        }
+        KeyCode::Char(',') => {
+            app.step_back();
+        }
+        KeyCode::Char('e') => app.captions = !app.captions,
         KeyCode::Char('+' | '=') => {
             app.speed_idx = (app.speed_idx + 1).min(SPEEDS.len() - 1);
         }
@@ -442,6 +468,30 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Flow {
     Flow::Stay
 }
 
+/// The warning printed before an SVG export, or None when there is nothing
+/// to warn about. The demo is synthetic; a real session is not.
+fn export_warning(args: &Args) -> Option<String> {
+    let file = args.svg.as_ref()?;
+    if args.demo {
+        return None;
+    }
+    Some(format!(
+        "warning: {} is drawn from a real session and can contain private prompts, \
+         code and file paths from it. Read it before you share it.",
+        file.display()
+    ))
+}
+
+/// Number of frames to export: `--frames`, or enough to cover `--from` to
+/// `--to` at `--fps`.
+fn frame_count(args: &Args, from: f64) -> anyhow::Result<usize> {
+    let Some(to) = args.to else {
+        return Ok(args.frames.max(1));
+    };
+    anyhow::ensure!(to > from, "--to must be later than --from");
+    Ok((((to - from) * args.fps as f64).round() as usize).max(1))
+}
+
 /// Headless render of one frame, for tests, screenshots and bug reports.
 fn snapshot(args: &Args, secs: f64) -> anyhow::Result<()> {
     let (w, h) = args
@@ -449,6 +499,7 @@ fn snapshot(args: &Args, secs: f64) -> anyhow::Result<()> {
         .split_once('x')
         .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
         .ok_or_else(|| anyhow::anyhow!("--size must look like 140x40"))?;
+    let frames = frame_count(args, secs)?;
     let mut app = if args.demo {
         demo()
     } else {
@@ -459,24 +510,31 @@ fn snapshot(args: &Args, secs: f64) -> anyhow::Result<()> {
         anyhow::ensure!(path.is_file(), "no such session file: {}", path.display());
         open(path, None, args)
     };
+    app.captions = args.captions;
+    if let Some(warning) = export_warning(args) {
+        eprintln!("{warning}");
+    }
     let mut term = Terminal::new(TestBackend::new(w, h))?;
     term.draw(|f| ui::draw(f, &mut app))?; // sizes the graph before layout
-    let frames = (secs * 30.0).ceil() as usize;
-    for _ in 0..frames.max(1) {
+    let ticks = (secs * 30.0).ceil() as usize;
+    for _ in 0..ticks.max(1) {
         app.tick(1.0 / 30.0);
     }
     term.draw(|f| ui::draw(f, &mut app))?;
     if let Some(file) = &args.svg {
-        // Extra frames are captured 0.2 s apart and loop at 5 fps.
-        let mut frames = vec![term.backend().buffer().clone()];
-        for _ in 1..args.frames.max(1) {
-            for _ in 0..6 {
+        // Frames are captured 1/fps s apart (in 1/30 s ticks) and loop at
+        // the same rate, so the animation plays in replay time.
+        let per = (30.0 / args.fps as f64).round().max(1.0) as usize;
+        let fps = 30.0 / per as f32;
+        let mut shots = vec![term.backend().buffer().clone()];
+        for _ in 1..frames {
+            for _ in 0..per {
                 app.tick(1.0 / 30.0);
             }
             term.draw(|f| ui::draw(f, &mut app))?;
-            frames.push(term.backend().buffer().clone());
+            shots.push(term.backend().buffer().clone());
         }
-        std::fs::write(file, svg::document(&frames, 5.0))?;
+        std::fs::write(file, svg::document(&shots, fps))?;
         return Ok(());
     }
     let buf = term.backend().buffer();
@@ -751,6 +809,82 @@ mod tests {
         press(&mut app, KeyCode::Char('k'));
         press(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('n'));
+    }
+
+    fn args(line: &[&str]) -> Args {
+        Args::try_parse_from(std::iter::once("neonhive").chain(line.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn only_real_session_exports_warn() {
+        let demo = args(&["--demo", "--snapshot", "5", "--svg", "x.svg"]);
+        assert_eq!(export_warning(&demo), None);
+        let text = args(&["s.jsonl", "--snapshot", "5"]);
+        assert_eq!(export_warning(&text), None, "text goes to the terminal");
+        let real = args(&["s.jsonl", "--from", "5", "--to", "9", "--svg", "x.svg"]);
+        let w = export_warning(&real).expect("warns");
+        assert!(w.contains("x.svg") && w.contains("private prompts"), "{w}");
+    }
+
+    #[test]
+    fn range_export_frame_count() {
+        let a = args(&["--demo", "--from", "30", "--to", "90", "--svg", "x.svg"]);
+        assert_eq!(a.snapshot, Some(30.0));
+        assert_eq!(frame_count(&a, 30.0).unwrap(), 300);
+        let a = args(&[
+            "--demo", "--from", "30", "--to", "90", "--svg", "x.svg", "--fps", "2",
+        ]);
+        assert_eq!(frame_count(&a, 30.0).unwrap(), 120);
+        let a = args(&[
+            "--demo",
+            "--snapshot",
+            "4",
+            "--svg",
+            "x.svg",
+            "--frames",
+            "30",
+        ]);
+        assert_eq!(frame_count(&a, 4.0).unwrap(), 30);
+        let a = args(&["--demo", "--snapshot", "4", "--svg", "x.svg"]);
+        assert_eq!(frame_count(&a, 4.0).unwrap(), 1);
+        let back = args(&["--demo", "--from", "9", "--to", "3", "--svg", "x.svg"]);
+        assert!(frame_count(&back, 9.0).is_err());
+        let bad = [
+            "--demo", "--from", "1", "--to", "3", "--svg", "x", "--frames", "4",
+        ];
+        assert!(Args::try_parse_from(std::iter::once("neonhive").chain(bad)).is_err());
+        let fast = [
+            "--demo", "--from", "1", "--to", "3", "--svg", "x", "--fps", "60",
+        ];
+        assert!(Args::try_parse_from(std::iter::once("neonhive").chain(fast)).is_err());
+        assert!(args(&["--demo", "--captions"]).captions);
+    }
+
+    #[test]
+    fn step_and_caption_keys() {
+        let mut app = App::new(
+            Box::new(demo::DemoSource::new(3)),
+            Mode::Replay,
+            "demo",
+            "demo",
+        );
+        for _ in 0..300 {
+            app.tick(1.0 / 30.0);
+        }
+        let seq = app.world.log_seq;
+        press(&mut app, KeyCode::Char(','));
+        assert!(app.paused);
+        assert!(app.world.log_seq < seq);
+        press(&mut app, KeyCode::Char('.'));
+        assert_eq!(app.world.log_seq, seq);
+        assert!(!app.captions);
+        press(&mut app, KeyCode::Char('e'));
+        assert!(app.captions);
+        // While typing a search they are just characters.
+        press(&mut app, KeyCode::Char('/'));
+        typed(&mut app, ".,e");
+        assert_eq!(app.panes.query, ".,e");
+        assert!(app.captions);
     }
 
     #[test]

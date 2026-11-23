@@ -196,6 +196,8 @@ flash on one. When history is loaded in bulk these are suppressed.
 The view model. It owns:
 
 - **Playback.** In live mode every event is applied as it arrives. In replay mode a virtual clock advances at the chosen speed and events are applied when the clock passes them. Gaps longer than one second of wall time are skipped.
+- **Stepping.** A paused replay steps forward one timestamp at a time until an event writes a stream line (`step_forward`). The app records, per applied event, whether it wrote one; stepping back (`step_back`) uses that record to find the previous stop and rebuilds the world from the start up to it without animation. `World::apply` is deterministic, so the rebuilt world equals the one played to that point, except for stall lines that the clock sweep logged on the way (the flags themselves are re-checked at the new time).
+- **Captions.** `caption::describe` turns the most recent event that wrote a stream line into plain words, from `Event` and agent names in the `World` only, so it needs nothing from an adapter and shows no more than the stream does.
 - **Visibility.** `choose_visible` picks which agents get a node: active ones first, then the most recently active, up to a cap derived from the panel size, plus any ancestors needed to draw edges.
 - **Layout.** `layout` places nodes radially (leaves on the rim, a node with a subtree part-way out), then `separate` pushes overlapping boxes apart in cell space.
 - **Panes.** Focus, panel sizes, full size, scroll positions and the event-stream search (`Panes`). The stream scroll position is a line number (`World::log_seq` numbering), so it stays on the same line while new lines arrive and old ones are dropped. Keys are mapped to these in `main.rs` (`handle_key`), which tests drive without a terminal; `ui` only reads them and writes back what it measured.
@@ -210,6 +212,11 @@ Draws straight into the ratatui buffer. Edges and packet trails use a small
 braille canvas (2x4 dots per cell) so lines have sub-cell resolution. Node boxes
 are composed cell by cell, which is what lets the spawn and dissolve effects
 replace individual characters.
+
+`src/svg.rs` turns rendered buffers into SVG. For an animation it cuts every frame
+into runs of same-styled text and writes each run once for every unbroken stretch
+of frames it appears in, as a group with a CSS animation that shows it for that
+stretch of the loop.
 
 ## Adding an adapter for another agent tool
 

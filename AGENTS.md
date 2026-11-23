@@ -72,7 +72,8 @@ Tests do not show what the screen looks like. For any change to `ui`, `app` layo
 | `src/state.rs` | `World`: events folded into agents, log, totals, cost, health |
 | `src/health.rs` | Stuck and loop detection (`Tracker`, flags) |
 | `src/pricing.rs` | Token price table and `cost()`; `--prices FILE` overrides |
-| `src/app.rs` | Playback clock, layout, animation state |
+| `src/app.rs` | Playback clock, stepping, layout, animation state |
+| `src/caption.rs` | Plain-language captions for events (teaching mode) |
 | `src/ui.rs` | Rendering into the ratatui buffer |
 | `src/picker.rs` | Session list screen |
 | `src/report.rs` | `neonhive report`: Markdown or JSON summary, never prompts |

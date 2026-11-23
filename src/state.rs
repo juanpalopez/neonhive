@@ -309,7 +309,7 @@ impl World {
     }
 
     /// Resolve a message recipient given as id, id prefix, label or type.
-    fn resolve(&self, to: &str) -> Option<String> {
+    pub fn resolve(&self, to: &str) -> Option<String> {
         if self.agents.contains_key(to) {
             return Some(to.to_string());
         }
