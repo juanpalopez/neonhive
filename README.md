@@ -137,10 +137,18 @@ signal handler, so the shell reports the usual interrupted status. `--once` uses
 session's own clock (its last event), so it cannot report stalls that only show as
 real time passes. Alerts name agents by id and label, never prompts or tool input.
 
+A file with no events yet (empty, or not a transcript) is not an error for `watch`:
+a live watch waits for events, and `--once` finds nothing and exits `0`. `report`
+exits `1` on such a file, since there is nothing to report; see
+[Session reports](#session-reports). `2` is for a usage error or a file that does
+not exist.
+
 ### Session reports
 
 `neonhive report` summarizes a session on stdout and does not open the UI. Without
-an argument it reports the most recent session.
+an argument it reports the most recent session that has any events, so a session
+that was just started and holds nothing yet is skipped; it looks at the 20 most
+recent sessions and, if none has events, says so and asks for a file.
 
 ```sh
 neonhive report                          # Markdown, most recent session
@@ -166,16 +174,20 @@ renders on GitHub.
 - **Cost** is the estimate from [Cost estimates](#cost-estimates), and
   `--prices FILE` changes it. An agent on a model with no known price shows `-`
   (`null`), never 0, and the session total is then marked as a lower bound (`+`
-  and `lower_bound: true`).
+  and `lower_bound: true`). When no agent could be priced the total is `-`
+  (`usd: null`, `lower_bound: false`, since there is no number to bound) and
+  `unpriced_agents` says how many agents lack a price. Markdown rounds each cost to
+  cents, so the per-agent cells may not add up exactly to the total shown. JSON
+  rounds to 6 decimals.
 - **Health flags** are the same as the UI's and as `neonhive watch --once`: the
   rules run once at the session's own clock (its last event), so a stall that only
   shows as real time passes is not reported. A reason names a tool and a count, or
   a silence; never tool input.
 
 A report is read in one go, so a last line with no trailing newline still counts.
-A file that yields no events at all (empty, not a transcript, a corrupt `.zst`, or
-a session with no prompt or reply yet) is an error: `report` prints a message on
-stderr and exits with status 1.
+A file named on the command line that yields no events at all (empty, not a
+transcript, a corrupt `.zst`, or a session with no prompt or reply yet) is an
+error: `report` prints a message on stderr and exits with status 1.
 
 A report never includes prompts, messages or tool arguments. It does hold:
 

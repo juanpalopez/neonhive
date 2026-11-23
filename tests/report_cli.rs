@@ -134,3 +134,55 @@ fn report_cost_equals_the_watch_cost_alert() {
     assert_eq!(alert["kind"], "max_cost");
     assert_eq!(alert["value"], v["cost"]["usd"]);
 }
+
+/// A session file under the scratch `HOME`'s Claude Code projects, with its
+/// modification time set `age_s` seconds into the past.
+fn listed(s: &Scratch, name: &str, text: &str, age_s: u64) -> PathBuf {
+    let dir = s.0.join(".claude/projects/proj");
+    fs::create_dir_all(&dir).unwrap();
+    let p = dir.join(name);
+    fs::write(&p, text).unwrap();
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_s);
+    fs::File::options()
+        .write(true)
+        .open(&p)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+    p
+}
+
+#[test]
+fn without_a_path_the_newest_session_with_events_is_reported() {
+    let s = Scratch::new("newest");
+    listed(&s, "old.jsonl", &session(), 600);
+    // Just created: nothing the adapter turns into an event yet.
+    let fresh = listed(
+        &s,
+        "new.jsonl",
+        "{\"type\":\"summary\",\"summary\":\"x\"}\n",
+        0,
+    );
+    let v = json(&s.run(&["report", "--json"]));
+    assert_eq!(v["tokens"]["input"], 1_000_000, "the older session");
+    // Named explicitly, the empty one is still an error.
+    assert!(!s.report(&fresh, &[]).status.success());
+}
+
+#[test]
+fn without_a_path_and_no_session_with_events_the_error_says_so() {
+    let s = Scratch::new("none");
+    listed(&s, "a.jsonl", "", 60);
+    listed(
+        &s,
+        "b.jsonl",
+        "{\"type\":\"summary\",\"summary\":\"x\"}\n",
+        0,
+    );
+    let out = s.run(&["report"]);
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("has any events yet"), "{err}");
+    assert!(err.contains("neonhive report PATH"), "{err}");
+}

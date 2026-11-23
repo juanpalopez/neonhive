@@ -101,12 +101,21 @@ impl Source for ClaudeSource {
     }
 
     fn poll_to_end(&mut self) -> Vec<Event> {
-        self.to_end = true;
-        self.main.to_end = true;
+        self.set_to_end(true);
+        let events = self.poll();
+        // Back to tailing: a later `poll` holds a half-written line back.
+        self.set_to_end(false);
+        events
+    }
+}
+
+impl ClaudeSource {
+    fn set_to_end(&mut self, on: bool) {
+        self.to_end = on;
+        self.main.to_end = on;
         for sub in &mut self.subs {
-            sub.to_end = true;
+            sub.to_end = on;
         }
-        self.poll()
     }
 }
 
@@ -703,6 +712,23 @@ mod tests {
         // A half-written line is still skipped, never a panic.
         s.append("s1.jsonl", "\n{\"type\":\"assistant\",\"mess");
         assert_eq!(ClaudeSource::open(&s.main()).poll_to_end().len(), 4);
+    }
+
+    #[test]
+    fn poll_after_poll_to_end_tails_again() {
+        let s = Scratch::new("to-end-then-tail");
+        s.append(
+            "s1.jsonl",
+            &assistant(1, "m1", r#"{"type":"text","text":"one"}"#),
+        );
+        let mut src = ClaudeSource::open(&s.main());
+        assert_eq!(src.poll_to_end().len(), 2);
+        let line = assistant(2, "m2", r#"{"type":"text","text":"two"}"#);
+        let (head, tail) = line.split_at(40);
+        s.append("s1.jsonl", head);
+        assert!(src.poll().is_empty(), "half a line is not an event yet");
+        s.append("s1.jsonl", tail);
+        assert_eq!(kinds(&src.poll()), vec!["usage main 35", "text main two"]);
     }
 
     #[test]

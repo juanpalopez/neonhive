@@ -177,12 +177,21 @@ impl Source for CodexSource {
     }
 
     fn poll_to_end(&mut self) -> Vec<Event> {
-        self.to_end = true;
-        self.root.lines.to_end = true;
+        self.set_to_end(true);
+        let events = self.poll();
+        // Back to tailing: a later `poll` holds a half-written line back.
+        self.set_to_end(false);
+        events
+    }
+}
+
+impl CodexSource {
+    fn set_to_end(&mut self, on: bool) {
+        self.to_end = on;
+        self.root.lines.to_end = on;
         for child in &mut self.children {
-            child.lines.to_end = true;
+            child.lines.to_end = on;
         }
-        self.poll()
     }
 }
 
@@ -1441,6 +1450,20 @@ mod tests {
             kinds(&CodexSource::open(&s.path(ROOT_FILE)).poll_to_end()),
             vec!["text main hello"]
         );
+    }
+
+    #[test]
+    fn poll_after_poll_to_end_tails_again() {
+        let s = Scratch::new("to-end-then-tail");
+        s.lines(ROOT_FILE, &[meta("t-root", "")]);
+        let mut src = CodexSource::open(&s.path(ROOT_FILE));
+        assert!(src.poll_to_end().is_empty());
+        let line = assistant(3, "hello") + "\n";
+        let (head, tail) = line.split_at(30);
+        s.append(ROOT_FILE, head);
+        assert!(src.poll().is_empty(), "half a line is not an event yet");
+        s.append(ROOT_FILE, tail);
+        assert_eq!(kinds(&src.poll()), vec!["text main hello"]);
     }
 
     #[test]

@@ -136,7 +136,8 @@ pub trait Source {
 
     /// Like `poll`, for a one-shot read of a file that is complete: a last
     /// line with no trailing newline counts too. `poll` holds such a line
-    /// back, because while tailing it may still be half written.
+    /// back, because while tailing it may still be half written. Later
+    /// `poll` calls tail as usual.
     fn poll_to_end(&mut self) -> Vec<Event> {
         self.poll()
     }

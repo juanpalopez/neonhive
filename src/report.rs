@@ -100,8 +100,9 @@ fn duration_ms(w: &World, a: &Agent) -> Option<i64> {
 }
 
 /// Session cost with the same honesty as the UI header: `usd` is `None` when
-/// nothing could be priced, and `lower_bound` is set when some agents could
-/// not be priced and are left out of `usd`.
+/// nothing could be priced, and `lower_bound` is set when `usd` is a number
+/// that leaves out agents that could not be priced. With no number there is
+/// nothing to bound, so `lower_bound` is false and `unpriced` tells why.
 struct SessionCost {
     usd: Option<f64>,
     lower_bound: bool,
@@ -112,9 +113,15 @@ fn session_cost(w: &World) -> SessionCost {
     let s = w.cost_summary();
     SessionCost {
         usd: (s.total() > 0.0 || s.unpriced == 0).then(|| s.total()),
-        lower_bound: s.unpriced > 0,
+        lower_bound: s.unpriced > 0 && s.total() > 0.0,
         unpriced: s.unpriced,
     }
+}
+
+/// Dollars in JSON: rounded to 6 decimals (a millionth of a dollar), so
+/// float sums print as `0.0525`, not `0.052500000000000005`.
+fn usd_json(usd: Option<f64>) -> Option<f64> {
+    usd.map(|u| (u * 1e6).round() / 1e6)
 }
 
 fn health_name(h: Health) -> &'static str {
@@ -357,7 +364,7 @@ pub fn json(w: &World) -> String {
                 "status": status_name(a.status),
                 "start_ms": agent_start_ms(w, a),
                 "duration_ms": duration_ms(w, a),
-                "cost_usd": a.cost(),
+                "cost_usd": usd_json(a.cost()),
                 "health": health_name(w.health(a)),
                 "tokens": tokens_json(&a.tokens, a.shown_tokens()),
                 "models": a.by_model.iter().map(|(m, _)| m.as_str()).collect::<Vec<_>>(),
@@ -401,7 +408,7 @@ pub fn json(w: &World) -> String {
         "start_ms": start_ms(w),
         "duration_ms": session_duration_ms(w),
         "cost": {
-            "usd": c.usd,
+            "usd": usd_json(c.usd),
             "lower_bound": c.lower_bound,
             "unpriced_agents": c.unpriced,
         },
@@ -693,6 +700,22 @@ mod tests {
     }
 
     #[test]
+    fn json_dollars_are_rounded_to_six_decimals() {
+        let mut w = World::new("proj");
+        w.apply(&ev(1_000, spawn("a1", ROOT, "explorer", "Map")), false);
+        // $3 per million input tokens: 0.0175 + 0.035 sums to 0.052500000000000005.
+        w.apply(&ev(2_000, usage(ROOT, "claude-sonnet-4-5", 5_833)), false);
+        w.apply(&ev(3_000, usage("a1", "claude-sonnet-4-5", 11_667)), false);
+        let raw = w.cost_summary().total();
+        let v: Value = serde_json::from_str(&json(&w)).unwrap();
+        let usd = v["cost"]["usd"].as_f64().unwrap();
+        assert_eq!(usd, (raw * 1e6).round() / 1e6);
+        assert_eq!(usd, 0.0525);
+        assert_eq!(v["agents"][0]["cost_usd"], 0.017499);
+        assert_eq!(v["agents"][1]["cost_usd"], 0.035001);
+    }
+
+    #[test]
     fn nothing_priced_is_a_dash_not_zero() {
         let mut w = World::new("proj");
         w.apply(&ev(1_000, usage(ROOT, "no-such-model", 500)), false);
@@ -703,7 +726,9 @@ mod tests {
         );
         let v: Value = serde_json::from_str(&json(&w)).unwrap();
         assert!(v["cost"]["usd"].is_null());
-        assert_eq!(v["cost"]["lower_bound"], true);
+        // Nothing to bound: the count says why there is no number.
+        assert_eq!(v["cost"]["lower_bound"], false);
+        assert_eq!(v["cost"]["unpriced_agents"], 1);
         assert!(v["agents"][0]["cost_usd"].is_null());
     }
 
