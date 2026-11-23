@@ -56,7 +56,8 @@ and CI checks them:
 | `revert` | Reverting a commit |
 
 The subject starts lower-case and has no final period. Add `!` after the type for
-a breaking change. Examples:
+a breaking change. Dependabot pull requests (author `dependabot[bot]`) are exempt from
+the lower-case rule only; their titles still need a valid type. Examples:
 
 ```
 feat(ui): add timeline bar to replay
@@ -75,7 +76,8 @@ fix(claude): count usage once per response
 ```
 
 Merge commits, `Revert "..."`, and `fixup!` / `squash!` / `amend!` commits are
-allowed. The body of a commit is free-form. To check before you push:
+allowed, and commits on pull requests authored by `dependabot[bot]` are not checked.
+The body of a commit is free-form. To check before you push:
 
 ```sh
 scripts/check-commit-messages.sh origin/main HEAD
@@ -96,7 +98,9 @@ ci/branch-and-commit-checks
 ```
 
 CI checks this (the `branch name` check). Bot branches (`dependabot/`, `renovate/`)
-and `release/` branches are exempt.
+and `release/` branches are exempt. Dependabot's lower-case exemption for titles and
+commit subjects keys on the pull request author, not the branch name, so a fork
+cannot claim it by naming a branch `dependabot/...`.
 
 Pull requests from a fork only get a warning for branch names and commit messages:
 a branch called `main` or a commit called `Update README.md` is common there, and
@@ -137,6 +141,23 @@ cargo run -- --demo --snapshot 20 --svg shot.svg   # image
 
 The demo is scripted, not random, so the same command gives the same frame before
 and after your change. For visual changes, please include a before and after.
+
+### Regenerating the README recording
+
+The animation at the top of the README (`docs/demo.gif`) is a recording of
+`neonhive --demo`, scripted in [`docs/demo.tape`](docs/demo.tape) with
+[VHS](https://github.com/charmbracelet/vhs). After a visible UI change, re-record it:
+
+```sh
+brew install vhs          # brings ttyd; ffmpeg must be installed too
+scripts/record-demo.sh    # builds a release binary, records, writes docs/demo.gif
+```
+
+The tape sets the terminal (Menlo 20 pt, 113 x 35 cells, which keeps the side
+column visible) and the keys pressed; the script turns VHS's lossless frames into
+a 10 fps, 64-colour GIF and warns if it grows past 3.5 MB. Look at the result
+before you commit it. The demo's event order is fixed but runs on the wall clock,
+so two recordings can differ by a frame or so. Never record a real session.
 
 ## Where things are
 

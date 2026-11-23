@@ -44,7 +44,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      # Dependabot commit subjects start with a capital "Bump". The exemption
+      # keys on the pull request author, which a fork cannot fake. The job and
+      # its check name still run and pass; only this step is skipped.
+      - name: Commit subjects exempt (Dependabot)
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        run: echo "Pull request author is dependabot[bot]; the lower-case subject rule does not apply."
       - name: Check commit subjects
+        if: github.event.pull_request.user.login != 'dependabot[bot]'
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
