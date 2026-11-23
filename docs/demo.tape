@@ -28,7 +28,7 @@ Sleep 300ms
 Show
 
 # 0-7 s: the main agent fans out, tools run, a subagent finishes.
-Sleep 7s
+Sleep 5s
 
 # Select a subagent (top of the roster, then down to the second one): the
 # inspector shows its task, model, tokens and cost. It is the demo's looping
@@ -40,9 +40,9 @@ Sleep 2.5s
 
 # Full-size the graph, then back.
 Type "z"
-Sleep 2.5s
+Sleep 1.8s
 Type "z"
-Sleep 1s
+Sleep 800ms
 
 # Search the event stream for the loop flag, then show only the matches.
 Type "/loop"
@@ -50,6 +50,18 @@ Sleep 400ms
 Enter
 Sleep 1.2s
 Type "&"
-Sleep 2.5s
+Sleep 1.8s
 Escape
-Sleep 1s
+Sleep 800ms
+
+# Captions on, then pause and step through three events.
+Type "e"
+Sleep 2s
+Space
+Sleep 500ms
+Type "."
+Sleep 900ms
+Type "."
+Sleep 900ms
+Type "."
+Sleep 1.2s

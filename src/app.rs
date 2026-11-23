@@ -437,7 +437,7 @@ impl App {
             .values()
             .filter(|a| a.health.flag().is_flagged() && !visible.contains(&a.id))
             .count();
-        self.box_w = box_width(visible.len());
+        self.box_w = fit_box_width(self.view, visible.len());
         let space = Space::new(self.view, self.box_w);
         let targets = layout(&self.world, &visible, &space);
         let ease = 1.0 - (-dt as f32 * 6.0).exp();
@@ -1009,14 +1009,29 @@ impl Space {
     }
 }
 
+/// Box widths a node can have, widest first.
+const BOX_WIDTHS: [u16; 3] = [24, 20, 16];
+
+/// Box width for `n` nodes in a graph panel of `view` cells: the usual width
+/// for that count ([`box_width`]), narrowed while the panel has fewer
+/// [`Space::slots`] than nodes. A panel too narrow for three columns of wide
+/// boxes can still hold three columns of narrow ones.
+pub fn fit_box_width(view: (u16, u16), n: usize) -> u16 {
+    let narrowest = BOX_WIDTHS[BOX_WIDTHS.len() - 1];
+    BOX_WIDTHS
+        .into_iter()
+        .filter(|&w| w <= box_width(n))
+        .find(|&w| n <= Space::new(view, w).slots().len())
+        .unwrap_or(narrowest)
+}
+
 /// Most nodes a graph panel of `view` cells can show with no two boxes
-/// sharing a cell, at the box width that many nodes get: the number of
-/// [`Space::slots`], counting up until a count does not fit (boxes narrow
-/// as the count grows, so a larger count can fit where a smaller one does
-/// not). At least 1, the root.
+/// sharing a cell: the number of [`Space::slots`] at the narrowest box width
+/// (`fit_box_width` narrows the boxes when a count needs it). At least 1,
+/// the root.
 pub fn node_bound(view: (u16, u16)) -> usize {
-    let fits = |n: usize| n <= Space::new(view, box_width(n)).slots().len();
-    (2..=64).take_while(|&n| fits(n)).last().unwrap_or(1)
+    let narrowest = BOX_WIDTHS[BOX_WIDTHS.len() - 1];
+    Space::new(view, narrowest).slots().len().max(1)
 }
 
 /// Radial tree layout, then overlap removal. Returns a position per visible
@@ -1441,6 +1456,23 @@ mod tests {
                 (id.clone(), x, y)
             })
             .collect()
+    }
+
+    #[test]
+    fn boxes_narrow_so_the_panel_is_used() {
+        // 113x35 terminal with the side column: wide boxes fit one column,
+        // narrow ones three. The bound must count the narrow ones.
+        let view = (71, 21);
+        assert_eq!(Space::new(view, 24).slots().len(), 5);
+        assert!(node_bound(view) >= 9, "{}", node_bound(view));
+        for view in [(30, 8), (58, 13), (71, 21), (78, 11), (98, 16), (160, 40)] {
+            let bound = node_bound(view);
+            for n in 1..=bound {
+                let w = fit_box_width(view, n);
+                assert!(w <= box_width(n), "{view:?} n={n}");
+                assert!(n <= Space::new(view, w).slots().len(), "{view:?} n={n}");
+            }
+        }
     }
 
     #[test]
