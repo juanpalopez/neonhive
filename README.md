@@ -330,7 +330,6 @@ Planned work is tracked as issues on the [roadmap board](https://github.com/user
 - Timeline scrubbing and jump-to-error in replays
 - Compare two sessions
 - Audit trail: commands run and files touched, per agent
-- `neonhive watch`: headless alerts when an agent fails, loops or passes a budget
 - Zoom and pan for very wide swarms
 - Themes
 - Prebuilt binaries and Homebrew
