@@ -79,5 +79,6 @@ Tests do not show what the screen looks like. For any change to `ui`, `app` layo
 | `src/watch.rs` | `neonhive watch`: alert logic (`Watcher`, `Idle`), pure and clock-free |
 | `src/svg.rs` | SVG export |
 | `src/fx.rs`, `src/util.rs` | Palette and color math; text and time helpers |
-| `scripts/` | CI checks, runnable locally (see Commands) |
+| `scripts/` | CI checks and release helpers (archives, Homebrew formula), runnable locally (see Commands) |
+| `packaging/homebrew/` | Homebrew formula, source of truth for the `juanpalopez/homebrew-tap` copy |
 | `docs/` | `ARCHITECTURE.md`, `RELEASING.md`, `demo.svg` |

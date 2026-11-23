@@ -58,20 +58,48 @@ neonhive --demo
 
 ## Install
 
-neonhive needs a [Rust toolchain](https://rustup.rs) (1.87 or newer).
+With a [Rust toolchain](https://rustup.rs) (1.87 or newer):
 
 ```sh
 # from crates.io
-cargo install neonhive
+cargo install --locked neonhive
 
 # latest from GitHub
-cargo install --git https://github.com/juanpalopez/neonhive
+cargo install --locked --git https://github.com/juanpalopez/neonhive
 
 # or from a checkout
 git clone https://github.com/juanpalopez/neonhive
 cd neonhive
-cargo install --path .
+cargo install --locked --path .
 ```
+
+Without Rust, from the next release on (not available for 0.1.0):
+
+```sh
+# Homebrew (macOS and Linux); builds from source, Homebrew fetches Rust itself
+brew install juanpalopez/tap/neonhive
+```
+
+Or download a prebuilt binary from the
+[releases page](https://github.com/juanpalopez/neonhive/releases): one
+`neonhive-v<version>-<target>.tar.gz` per platform, for `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` and
+`x86_64-unknown-linux-musl` (static, for any x86_64 Linux). Each archive holds the
+`neonhive` binary, `LICENSE` and `README.md`; `SHA256SUMS` lists their checksums.
+
+```sh
+# example: Apple silicon; replace the version and target
+v=0.2.0 t=aarch64-apple-darwin
+curl -fsSLO "https://github.com/juanpalopez/neonhive/releases/download/v$v/neonhive-v$v-$t.tar.gz"
+curl -fsSLO "https://github.com/juanpalopez/neonhive/releases/download/v$v/neonhive-v$v-$t.tar.gz.sha256"
+shasum -a 256 -c "neonhive-v$v-$t.tar.gz.sha256"
+tar -xzf "neonhive-v$v-$t.tar.gz"
+mv "neonhive-v$v-$t/neonhive" ~/.local/bin/    # or any directory on your PATH
+```
+
+The macOS binaries are not notarized. If Gatekeeper blocks one downloaded with a
+browser, run `xattr -d com.apple.quarantine ~/.local/bin/neonhive` (files fetched with
+`curl` are not quarantined).
 
 ## Usage
 
