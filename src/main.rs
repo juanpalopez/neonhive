@@ -221,21 +221,54 @@ fn open(path: &Path, info: Option<&SessionInfo>, args: &Args) -> App {
     app
 }
 
+/// Sessions `report` looks at, newest first, for one with events when no
+/// file is given.
+const REPORT_SCAN: usize = 20;
+
 /// Prints a session report to stdout. No UI, no animation.
 fn report(session: Option<&Path>, json: bool) -> anyhow::Result<()> {
     let sessions = all_sessions();
-    let (path, info) = match session {
+    // A one-shot read: the file is taken as complete, last line included.
+    let read = |p: &Path| source(p).poll_to_end();
+    let (path, info, events) = match session {
         Some(p) => {
             anyhow::ensure!(p.is_file(), "no such session file: {}", p.display());
             let p = p.canonicalize()?;
             let info = sessions.iter().find(|s| s.path == p);
-            (p, info)
+            let events = read(&p);
+            // An empty, unreadable or foreign file would otherwise print a
+            // report of nothing and look like a success.
+            anyhow::ensure!(
+                !events.is_empty(),
+                "no session events in {}: the file is empty, not a Claude Code or Codex \
+                 transcript, unreadable (a corrupt .zst, for example), or a session with \
+                 no prompt or reply yet",
+                p.display()
+            );
+            (p, info, events)
         }
         None => {
-            let first = sessions
-                .first()
-                .ok_or_else(|| anyhow::anyhow!("no Claude Code or Codex sessions found"))?;
-            (first.path.clone(), Some(first))
+            anyhow::ensure!(
+                !sessions.is_empty(),
+                "no Claude Code or Codex sessions found"
+            );
+            // The newest session may have just been created and hold nothing
+            // yet; take the newest one with events, looking at a bounded
+            // number so a directory of empty files is not read in full.
+            sessions
+                .iter()
+                .take(REPORT_SCAN)
+                .find_map(|s| {
+                    let events = read(&s.path);
+                    (!events.is_empty()).then(|| (s.path.clone(), Some(s), events))
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "none of the {} most recent sessions has any events yet; \
+                         pass a session file: neonhive report PATH",
+                        sessions.len().min(REPORT_SCAN)
+                    )
+                })?
         }
     };
     let title = match info {
@@ -247,9 +280,7 @@ fn report(session: Option<&Path>, json: bool) -> anyhow::Result<()> {
             .unwrap_or_default(),
     };
     let mut world = state::World::new(&title);
-    for ev in source(&path).poll() {
-        world.apply(&ev, false);
-    }
+    report::load(&mut world, &events);
     let mut text = if json {
         report::json(&world)
     } else {
@@ -307,7 +338,13 @@ fn watch_loop(session: Option<&Path>, opts: &watch::Opts) -> anyhow::Result<i32>
     let mut fired = false;
     let mut out = std::io::stdout().lock();
     loop {
-        let events = source.poll();
+        // `--once` is a one-shot read like `report`, so the last line counts
+        // even without a newline; a live watch holds it back until complete.
+        let events = if opts.once {
+            source.poll_to_end()
+        } else {
+            source.poll()
+        };
         let clock = (!opts.once).then(util::now_ms);
         let mut closed = false;
         for alert in watcher.poll(&mut world, &events, clock) {

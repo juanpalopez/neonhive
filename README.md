@@ -52,7 +52,7 @@ neonhive --demo
 
 - **Cost estimates.** Estimated cost per agent, per agent type and for the whole session, and how much of it the subagents spent. See [Cost estimates](#cost-estimates).
 - **Stuck and loop detection.** Agents that repeat the exact same tool call in quick succession (polling with pauses between calls does not count), fail several calls in a row or go silent mid-task are flagged in orange on the graph, in the roster and in the inspector, which says why. Works in replay too.
-- **Session reports.** `neonhive report` prints a Markdown or JSON summary of a session: tokens by kind, an agent table, most used tools and failures. Paste it into a pull request or feed it to a script.
+- **Session reports.** `neonhive report` prints a Markdown or JSON summary of a session: tokens by kind, estimated cost, an agent table, most used tools, failures and health flags. Paste it into a pull request or feed it to a script.
 - **Watchdog.** `neonhive watch` follows a session with no UI and prints one line per alert: an agent failed, an agent is looping, erroring or stalled, or the session passed a token or cost budget. Exit codes make it usable in scripts and CI. See [Watching a session](#watching-a-session).
 
 ### Safe to run
@@ -159,10 +159,18 @@ signal handler, so the shell reports the usual interrupted status. `--once` uses
 session's own clock (its last event), so it cannot report stalls that only show as
 real time passes. Alerts name agents by id and label, never prompts or tool input.
 
+A file with no events yet (empty, or not a transcript) is not an error for `watch`:
+a live watch waits for events, and `--once` finds nothing and exits `0`. `report`
+exits `1` on such a file, since there is nothing to report; see
+[Session reports](#session-reports). `2` is for a usage error or a file that does
+not exist.
+
 ### Session reports
 
 `neonhive report` summarizes a session on stdout and does not open the UI. Without
-an argument it reports the most recent session.
+an argument it reports the most recent session that has any events, so a session
+that was just started and holds nothing yet is skipped; it looks at the 20 most
+recent sessions and, if none has events, says so and asks for a file.
 
 ```sh
 neonhive report                          # Markdown, most recent session
@@ -171,15 +179,47 @@ neonhive report --json > report.json     # JSON for scripts
 neonhive report >> "$GITHUB_STEP_SUMMARY"
 ```
 
-The Markdown has a header (start, duration, agents, tool calls, errors), a token
-table split into input, output, cache write (5-minute and 1-hour) and cache read, an agent table in spawn
-order with nesting (`↳`), the ten most used tools, and a list of failed agents and
-agents with tool errors. It renders on GitHub.
+The Markdown has a header (start, duration, agents, tool calls, errors, tokens,
+estimated cost), a token table split into input, output, cache write (5-minute and
+1-hour) and cache read, an agent table in spawn order with nesting (`↳`) and a cost
+per agent, the ten most used tools, a list of failed agents and agents with tool
+errors, and the agents flagged as looping, erroring or stalled, with the reason. It
+renders on GitHub.
 
-A report holds agent labels, tool names and counts. It never includes prompts,
-messages or tool arguments. Labels are the task descriptions the agent was given,
-so they can still mention file names or internal projects: **review a report before
-you share it.**
+- **Start and duration** run from the first prompt to the last event. A session
+  with no timestamps shows `-` (`null` in JSON).
+- **Tool calls** counts the calls shown as tool calls in the event stream. A call
+  that the adapter turns into a subagent spawn or a message to another agent is
+  shown as that instead and is not counted; Claude Code's subagent and message
+  calls are such calls. Where an adapter sees such a call only as an ordinary call,
+  it is counted.
+- **Cost** is the estimate from [Cost estimates](#cost-estimates), and
+  `--prices FILE` changes it. An agent on a model with no known price shows `-`
+  (`null`), never 0, and the session total is then marked as a lower bound (`+`
+  and `lower_bound: true`). When no agent could be priced the total is `-`
+  (`usd: null`, `lower_bound: false`, since there is no number to bound) and
+  `unpriced_agents` says how many agents lack a price. Markdown rounds each cost to
+  cents, so the per-agent cells may not add up exactly to the total shown. JSON
+  rounds to 6 decimals.
+- **Health flags** are the same as the UI's and as `neonhive watch --once`: the
+  rules run once at the session's own clock (its last event), so a stall that only
+  shows as real time passes is not reported. A reason names a tool and a count, or
+  a silence; never tool input.
+
+A report is read in one go, so a last line with no trailing newline still counts.
+A file named on the command line that yields no events at all (empty, not a
+transcript, a corrupt `.zst`, or a session with no prompt or reply yet) is an
+error: `report` prints a message on stderr and exits with status 1.
+
+A report never includes prompts, messages or tool arguments. It does hold:
+
+- the **title**: the project directory name and, when the agent tool wrote one, its
+  generated session title, which is a short summary of the first prompt;
+- **agent labels**: the description each subagent was spawned with, which can name
+  files, tasks or internal projects;
+- tool names, counts, tokens and costs.
+
+So **review a report before you share it in public.**
 
 The JSON layout is stable within a `schema` version. Keys are sorted, durations and
 times are milliseconds, and `start_ms` is Unix time. An abridged example:
@@ -189,24 +229,28 @@ times are milliseconds, and `start_ms` is Unix time. An abridged example:
   "agent_count": 2,
   "agents": [
     {
-      "depth": 0, "duration_ms": 60000, "errors": 0, "id": "main",
-      "label": "myproject", "models": ["model-a"], "parent": null,
-      "start_ms": 1700000000000, "status": "running", "tool_calls": 3,
+      "cost_usd": 0.0012, "depth": 0, "duration_ms": 60000, "errors": 0,
+      "health": "looping", "id": "main", "label": "myproject", "models": ["model-a"],
+      "parent": null, "start_ms": 1700000000000, "status": "running", "tool_calls": 3,
       "tokens": { "cache_read": 1000, "cache_write": 20, "cache_write_1h": 8, "cache_write_5m": 12, "input": 100, "output": 50, "total": 170 },
       "type": "main"
     },
     {
-      "depth": 1, "duration_ms": 4000, "errors": 1, "id": "a1",
-      "label": "Map the code", "models": [], "parent": "main",
-      "start_ms": 1700000001000, "status": "failed", "tool_calls": 2,
+      "cost_usd": null, "depth": 1, "duration_ms": 4000, "errors": 1,
+      "health": "ok", "id": "a1", "label": "Map the code", "models": [],
+      "parent": "main", "start_ms": 1700000001000, "status": "failed", "tool_calls": 2,
       "tokens": { "cache_read": 0, "cache_write": 0, "cache_write_1h": 0, "cache_write_5m": 0, "input": 0, "output": 0, "total": 0 },
       "type": "explorer"
     }
   ],
+  "cost": { "lower_bound": true, "unpriced_agents": 1, "usd": 0.0012 },
   "duration_ms": 60000,
   "errors": 1,
   "failures": [
     { "errors": 1, "failed": true, "id": "a1", "label": "Map the code", "type": "explorer" }
+  ],
+  "flags": [
+    { "health": "looping", "id": "main", "label": "myproject", "reason": "loop: Bash x4", "type": "main" }
   ],
   "schema": 1,
   "start_ms": 1700000000000,
@@ -220,7 +264,12 @@ times are milliseconds, and `start_ms` is Unix time. An abridged example:
 `tokens.total` is the headline number shown in the UI: input, output and cache
 writes, without cache reads. `cache_write` is the total of both write kinds, as it
 always was; `cache_write_5m` and `cache_write_1h` split it. An agent's `status` is `running` if its session never
-recorded a result for it.
+recorded a result for it. `start_ms` and `duration_ms` are `null` when the session
+has no timestamps. `cost.usd` and `cost_usd` are USD, `null` when nothing could be
+priced; `cost.unpriced_agents` counts agents on a model with no known price.
+`health` is `ok`, `looping`, `erroring` or `stalled`; `flags` lists the agents that
+are not `ok`. Labels are cut at 80 characters in JSON and 60 in Markdown, to keep
+the table readable.
 
 ### Keys
 

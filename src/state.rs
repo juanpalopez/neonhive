@@ -486,6 +486,12 @@ impl World {
             Kind::Prompt { agent, text } => {
                 let a = self.ensure(agent, ts);
                 if agent == ROOT {
+                    // The first prompt starts the session. Not `touch`: a
+                    // prompt is not the agent acting, so it must not resume
+                    // or re-check health.
+                    if a.spawned_ts == 0 {
+                        a.spawned_ts = ts;
+                    }
                     a.prompt = text.clone();
                     a.last_ts = ts;
                     self.say(ts, agent, LogKind::Prompt, clean(text, 160));
@@ -563,7 +569,9 @@ pub struct TypeCost {
 impl World {
     pub fn cost_summary(&self) -> CostSummary {
         let mut s = CostSummary::default();
-        for a in self.agents.values() {
+        // Spawn order, not map order: float sums depend on the order, and the
+        // same session must give the same total in every run and command.
+        for a in self.order.iter().filter_map(|id| self.agents.get(id)) {
             match a.cost() {
                 Some(c) if a.id == ROOT => s.main += c,
                 Some(c) => s.subagents += c,
@@ -700,6 +708,21 @@ mod tests {
         assert_eq!(w.total_tools, 1);
         // spawn packet, tool flash, result packet
         assert_eq!(w.fx.len(), 3);
+    }
+
+    #[test]
+    fn first_root_prompt_starts_the_session() {
+        let mut w = World::new("proj");
+        let prompt = |text: &str| Kind::Prompt {
+            agent: ROOT.into(),
+            text: text.into(),
+        };
+        w.apply(&ev(1_000, prompt("one")), false);
+        assert_eq!(w.agents[ROOT].spawned_ts, 1_000);
+        w.apply(&ev(5_000, tool(ROOT)), false);
+        w.apply(&ev(9_000, prompt("two")), false);
+        assert_eq!(w.agents[ROOT].spawned_ts, 1_000, "later prompts keep it");
+        assert_eq!(w.agents[ROOT].status, Status::Running);
     }
 
     #[test]
