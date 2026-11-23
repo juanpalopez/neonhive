@@ -56,7 +56,8 @@ and CI checks them:
 | `revert` | Reverting a commit |
 
 The subject starts lower-case and has no final period. Add `!` after the type for
-a breaking change. Examples:
+a breaking change. Dependabot pull requests (author `dependabot[bot]`) are exempt from
+the lower-case rule only; their titles still need a valid type. Examples:
 
 ```
 feat(ui): add timeline bar to replay
@@ -75,7 +76,8 @@ fix(claude): count usage once per response
 ```
 
 Merge commits, `Revert "..."`, and `fixup!` / `squash!` / `amend!` commits are
-allowed. The body of a commit is free-form. To check before you push:
+allowed, and commits on pull requests authored by `dependabot[bot]` are not checked.
+The body of a commit is free-form. To check before you push:
 
 ```sh
 scripts/check-commit-messages.sh origin/main HEAD
@@ -96,7 +98,9 @@ ci/branch-and-commit-checks
 ```
 
 CI checks this (the `branch name` check). Bot branches (`dependabot/`, `renovate/`)
-and `release/` branches are exempt.
+and `release/` branches are exempt. Dependabot's lower-case exemption for titles and
+commit subjects keys on the pull request author, not the branch name, so a fork
+cannot claim it by naming a branch `dependabot/...`.
 
 Pull requests from a fork only get a warning for branch names and commit messages:
 a branch called `main` or a commit called `Update README.md` is common there, and
