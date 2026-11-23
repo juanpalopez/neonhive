@@ -32,7 +32,7 @@ each one shows.
 Try it in ten seconds, no agent sessions needed:
 
 ```sh
-cargo install neonhive
+cargo install --locked neonhive
 neonhive --demo
 ```
 
@@ -62,19 +62,52 @@ neonhive --demo
 
 ## Install
 
-neonhive needs a [Rust toolchain](https://rustup.rs) (1.87 or newer).
+With a [Rust toolchain](https://rustup.rs) (1.87 or newer):
 
 ```sh
 # from crates.io
-cargo install neonhive
+cargo install --locked neonhive
 
 # latest from GitHub
-cargo install --git https://github.com/juanpalopez/neonhive
+cargo install --locked --git https://github.com/juanpalopez/neonhive
 
 # or from a checkout
 git clone https://github.com/juanpalopez/neonhive
 cd neonhive
-cargo install --path .
+cargo install --locked --path .
+```
+
+Without Rust, prebuilt binaries are attached to releases after 0.1.0 (there are none
+for 0.1.0). Download one from the
+[releases page](https://github.com/juanpalopez/neonhive/releases): one
+`neonhive-v<version>-<target>.tar.gz` per platform, for `aarch64-apple-darwin`,
+`x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`,
+`x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`. The `-gnu` builds need
+glibc 2.39 or newer (Ubuntu 24.04, Debian 13, Fedora 40 or later); the `-musl` builds
+are static and run on any Linux, older distributions and Alpine included. Each archive
+holds the `neonhive` binary, `LICENSE` and `README.md`; `SHA256SUMS` lists their
+checksums.
+
+```sh
+# example: Apple silicon; replace the version and target
+v=0.2.0 t=aarch64-apple-darwin
+curl -fsSLO "https://github.com/juanpalopez/neonhive/releases/download/v$v/neonhive-v$v-$t.tar.gz"
+curl -fsSLO "https://github.com/juanpalopez/neonhive/releases/download/v$v/neonhive-v$v-$t.tar.gz.sha256"
+shasum -a 256 -c "neonhive-v$v-$t.tar.gz.sha256"
+tar -xzf "neonhive-v$v-$t.tar.gz"
+mv "neonhive-v$v-$t/neonhive" ~/.local/bin/    # or any directory on your PATH
+```
+
+The macOS binaries are not notarized. If Gatekeeper blocks one downloaded with a
+browser, run `xattr -d com.apple.quarantine ~/.local/bin/neonhive` (files fetched with
+`curl` are not quarantined).
+
+Homebrew (macOS and Linux), once the `juanpalopez/homebrew-tap` tap is set up; it is
+not published yet, and this line will say so when it is:
+
+```sh
+# builds from source; Homebrew fetches Rust itself
+brew install juanpalopez/tap/neonhive
 ```
 
 ## Usage

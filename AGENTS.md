@@ -20,6 +20,8 @@ Run the first three before every push, and run the whole `cargo test`, not a sub
 
 Do not weaken a check to get green: no lowered limit, dropped step, or edit to `scripts/check-*.sh` or `.github/workflows` without saying why in the pull request. A human must read such a change, because those checks run from the pull request's own copy and could otherwise approve themselves. Move a finding a tool could catch into CI (a clippy lint in `[lints]`, a script in `scripts/`) rather than repeating it in review.
 
+Actions in workflows are pinned by full commit SHA with the version as a trailing comment (`uses: actions/checkout@<sha> # v4.4.0`), so Dependabot can update both; resolve a new SHA from the tag on GitHub, never from memory. (`ci.yml` and `release.yml` are pinned; the other workflows follow in a later change.)
+
 ## Workflow
 
 - Never commit to `main`. It is protected: pull request required, checks `lint`, `test (ubuntu-latest)`, `test (macos-latest)`, `conventional title`, `branch name`, `commit messages` and `changelog` must pass, linear history, no force push, admins included. Work on a branch, open a pull request, squash merge.
@@ -79,5 +81,6 @@ Tests do not show what the screen looks like. For any change to `ui`, `app` layo
 | `src/watch.rs` | `neonhive watch`: alert logic (`Watcher`, `Idle`), pure and clock-free |
 | `src/svg.rs` | SVG export |
 | `src/fx.rs`, `src/util.rs` | Palette and color math; text and time helpers |
-| `scripts/` | CI checks, runnable locally (see Commands) |
+| `scripts/` | CI checks and release helpers (archives, Homebrew formula), runnable locally (see Commands) |
+| `packaging/homebrew/` | Homebrew formula, source of truth for the `juanpalopez/homebrew-tap` copy |
 | `docs/` | `ARCHITECTURE.md`, `RELEASING.md`, `demo.gif` (README recording) and `demo.tape` (its VHS script, run by `scripts/record-demo.sh`) |
