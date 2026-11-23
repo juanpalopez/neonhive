@@ -170,7 +170,8 @@ so two recordings can differ by a frame or so. Never record a real session.
 | `src/state.rs` | World state, built by applying events |
 | `src/pricing.rs` | Price table and cost estimates |
 | `src/health.rs` | Stuck and loop detection |
-| `src/app.rs` | Playback clock, graph layout, animation state |
+| `src/app.rs` | Playback clock, stepping, graph layout, animation state |
+| `src/caption.rs` | Plain-language captions for events (teaching mode) |
 | `src/ui.rs` | Rendering |
 | `src/picker.rs` | Session list screen |
 | `src/svg.rs` | SVG export |

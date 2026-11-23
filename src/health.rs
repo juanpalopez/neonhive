@@ -184,6 +184,17 @@ pub struct Facts {
     pub has_running_child: bool,
 }
 
+/// Silence after which [`assess`] can call an agent with this tracker
+/// stalled: [`STALL_AFTER_CALL_MS`] while it waits on a call or message,
+/// [`STALL_MS`] otherwise.
+pub fn stall_limit(t: &Tracker) -> i64 {
+    if t.waiting {
+        STALL_AFTER_CALL_MS
+    } else {
+        STALL_MS
+    }
+}
+
 /// The health of one agent.
 ///
 /// Only running agents are flagged; finishing clears every flag. In order of
@@ -215,11 +226,7 @@ pub fn assess(t: &Tracker, f: &Facts) -> Health {
     if t.repeats >= LOOP_REPEATS {
         return Health::Looping;
     }
-    let limit = if t.waiting {
-        STALL_AFTER_CALL_MS
-    } else {
-        STALL_MS
-    };
+    let limit = stall_limit(t);
     if !f.is_root && !f.resumed && f.silent_ms > limit && !f.has_running_child {
         return Health::Stalled;
     }

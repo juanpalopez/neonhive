@@ -97,6 +97,28 @@ new activity. An older session opens as a **replay** from its start. Force eithe
 Start your agent tool (Claude Code or Codex) in one terminal, run `neonhive --latest`
 in another, and give the agent a task that uses subagents.
 
+### Presenting a session
+
+For talks, posts and onboarding, a replay (or the demo) can be walked through one
+event at a time. Press `space` to pause, then `.` to step to the next event and `,`
+to step back to the previous one; a step while playing pauses first. A step
+applies every event of the next moment (events with the same timestamp) and keeps
+going until one of them shows up in the event stream, so token-usage updates ride
+along with the next visible event. Stepping back rebuilds the session from its
+start up to that point, which takes a few milliseconds even on a session of more
+than ten thousand events. A live session cannot be stepped; the demo pauses into a
+replay, and `l` makes it live again.
+
+Press `e`, or start with `--captions`, for a caption above the footer that explains
+the most recent event in plain words, for example "main spawned a subagent explorer
+to work on: Map auth module call graph", with a second line on what that means. A
+caption shows only what the event stream already shows.
+
+```sh
+neonhive --demo --captions
+neonhive session.jsonl --replay --captions
+```
+
 ### Watching a session
 
 `neonhive watch [SESSION]` follows a session without opening the UI and prints one
@@ -265,7 +287,9 @@ the table readable.
 | `&` | Show matching lines only, or all lines |
 | `f` | Follow the most recently active agent |
 | `c` | Switch the roster between agents and cost by agent type |
-| `space` | Pause or resume a replay |
+| `space` | Pause or resume a replay; pauses the demo into a replay |
+| `.` `,` | Step to the next or previous event (pauses first); not in a live session |
+| `e` | Captions: explain the most recent event in plain words |
 | `+` `-` | Replay speed |
 | `r` | Replay the session from its start |
 | `l` | Jump to the end and follow live |
@@ -328,7 +352,22 @@ are made this way.
 neonhive --demo --snapshot 20                              # text to stdout
 neonhive --demo --snapshot 20 --svg shot.svg               # one frame
 neonhive --demo --snapshot 14 --svg loop.svg --frames 30   # animated loop
+neonhive --demo --svg range.svg --from 30 --to 90          # 60 s of replay, animated
+neonhive --demo --snapshot 20 --captions                   # with a caption
 ```
+
+`--from` is another name for `--snapshot`; both count seconds of replay as you would
+watch it, at the replay speed and with long gaps skipped. `--to` exports every frame
+up to that time as one looping SVG (CSS animation, no scripts), at `--fps` frames per
+second: 1, 2, 3, 5 (the default), 6, 10, 15 or 30, so the loop lasts exactly the
+range. Text that stays put across frames is written once, so a 60 second range of
+the demo at 140x40 is about 3.5 MB at 5 fps and 1.8 MB at 2 fps. One SVG holds at
+most 1,800 frames (6 minutes at 5 fps, about 21 MB); for a longer range, export
+less of it or lower `--fps`. Characters that XML does not allow are written as `�`.
+
+An export of a real session (anything but `--demo`) can contain private prompts,
+code and file paths from that session. neonhive prints a warning when it writes one;
+read the file before you share it.
 
 ## How it works
 
