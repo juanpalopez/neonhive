@@ -20,6 +20,8 @@ pub struct ClaudeSource {
     known: HashSet<String>,
     /// tool_use id of an `Agent` call -> id of the agent that made the call.
     spawners: HashMap<String, String>,
+    /// Set by [`Source::poll_to_end`]; passed to every tailer.
+    to_end: bool,
 }
 
 impl ClaudeSource {
@@ -30,6 +32,7 @@ impl ClaudeSource {
             subs: Vec::new(),
             known: HashSet::new(),
             spawners: HashMap::new(),
+            to_end: false,
         }
     }
 
@@ -49,7 +52,9 @@ impl ClaudeSource {
                 continue;
             };
             if self.known.insert(id.to_string()) {
-                self.subs.push(Tailer::new(path.clone(), id.to_string()));
+                let mut sub = Tailer::new(path.clone(), id.to_string());
+                sub.to_end = self.to_end;
+                self.subs.push(sub);
             }
         }
     }
@@ -94,6 +99,24 @@ impl Source for ClaudeSource {
         out.sort_by_key(|e| e.ts); // stable: a spawn stays ahead of same-time events
         out
     }
+
+    fn poll_to_end(&mut self) -> Vec<Event> {
+        self.set_to_end(true);
+        let events = self.poll();
+        // Back to tailing: a later `poll` holds a half-written line back.
+        self.set_to_end(false);
+        events
+    }
+}
+
+impl ClaudeSource {
+    fn set_to_end(&mut self, on: bool) {
+        self.to_end = on;
+        self.main.to_end = on;
+        for sub in &mut self.subs {
+            sub.to_end = on;
+        }
+    }
 }
 
 struct Meta {
@@ -122,6 +145,9 @@ struct Tailer {
     announced: bool,
     /// Usage already emitted, per API message id.
     counted: HashMap<String, Tokens>,
+    /// Treat a last line without a newline as complete. See
+    /// [`Source::poll_to_end`].
+    to_end: bool,
 }
 
 impl Tailer {
@@ -135,6 +161,7 @@ impl Tailer {
             last_ts: 0,
             announced: false,
             counted: HashMap::new(),
+            to_end: false,
         }
     }
 
@@ -164,6 +191,13 @@ impl Tailer {
             start += pos + 1;
         }
         buf.drain(..start);
+        if self.to_end && !buf.is_empty() {
+            // One-shot read of a complete file: the last line is whole.
+            if let Ok(line) = std::str::from_utf8(&buf) {
+                self.parse(line, spawners, out);
+            }
+            buf.clear();
+        }
         self.carry = buf; // incomplete last line, finished on a later poll
     }
 
@@ -653,6 +687,48 @@ mod tests {
             kinds(&src.poll()),
             vec!["usage main 35", "tool main Bash ls -la"]
         );
+    }
+
+    #[test]
+    fn poll_to_end_counts_a_last_line_without_newline() {
+        let s = Scratch::new("to-end");
+        let first = assistant(1, "m1", r#"{"type":"text","text":"one"}"#);
+        let last = assistant(2, "m2", r#"{"type":"text","text":"two"}"#);
+        s.append("s1.jsonl", &first);
+        s.append("s1.jsonl", last.trim_end_matches('\n'));
+        // Tailing holds the unterminated line back; a one-shot read does not.
+        let tailed = kinds(&ClaudeSource::open(&s.main()).poll());
+        assert_eq!(tailed, vec!["usage main 35", "text main one"]);
+        let whole = kinds(&ClaudeSource::open(&s.main()).poll_to_end());
+        assert_eq!(
+            whole,
+            vec![
+                "usage main 35",
+                "text main one",
+                "usage main 35",
+                "text main two"
+            ]
+        );
+        // A half-written line is still skipped, never a panic.
+        s.append("s1.jsonl", "\n{\"type\":\"assistant\",\"mess");
+        assert_eq!(ClaudeSource::open(&s.main()).poll_to_end().len(), 4);
+    }
+
+    #[test]
+    fn poll_after_poll_to_end_tails_again() {
+        let s = Scratch::new("to-end-then-tail");
+        s.append(
+            "s1.jsonl",
+            &assistant(1, "m1", r#"{"type":"text","text":"one"}"#),
+        );
+        let mut src = ClaudeSource::open(&s.main());
+        assert_eq!(src.poll_to_end().len(), 2);
+        let line = assistant(2, "m2", r#"{"type":"text","text":"two"}"#);
+        let (head, tail) = line.split_at(40);
+        s.append("s1.jsonl", head);
+        assert!(src.poll().is_empty(), "half a line is not an event yet");
+        s.append("s1.jsonl", tail);
+        assert_eq!(kinds(&src.poll()), vec!["usage main 35", "text main two"]);
     }
 
     #[test]

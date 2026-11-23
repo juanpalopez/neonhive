@@ -41,6 +41,10 @@ pub struct App {
     source: Box<dyn Source>,
     history: Vec<Event>,
     cursor: usize,
+    /// Per applied event: whether it wrote a line to the event stream. Filled
+    /// as events are applied; applying is deterministic, so it stays valid
+    /// when the world is rebuilt.
+    logged: Vec<bool>,
     root_label: String,
     pub title: String,
     pub mode: Mode,
@@ -70,6 +74,11 @@ pub struct App {
     pub cost_view: bool,
     /// Focus, panel sizes, scroll positions and the stream search.
     pub panes: Panes,
+    /// Show a plain-language caption for the most recent event.
+    pub captions: bool,
+    /// Live mode may pause into a replay. Set for scripted sources (the
+    /// demo); a real live session cannot be paused or stepped.
+    pub pausable: bool,
 }
 
 impl App {
@@ -81,6 +90,7 @@ impl App {
             vt: history.first().map(|e| e.ts as f64).unwrap_or(0.0),
             history,
             cursor: 0,
+            logged: Vec::new(),
             root_label: root_label.to_string(),
             title: title.to_string(),
             mode,
@@ -102,6 +112,8 @@ impl App {
             help: false,
             cost_view: false,
             panes: Panes::default(),
+            captions: false,
+            pausable: false,
         };
         if mode == Mode::Live {
             app.jump_to_end();
@@ -119,9 +131,8 @@ impl App {
 
     /// Apply everything not yet shown, without animation, and follow live.
     pub fn jump_to_end(&mut self) {
-        while self.cursor < self.history.len() {
-            self.world.apply(&self.history[self.cursor], false);
-            self.cursor += 1;
+        while !self.at_end() {
+            self.apply_next(false);
         }
         self.world.fx.clear();
         self.mode = Mode::Live;
@@ -150,16 +161,26 @@ impl App {
         self.follow = false;
     }
 
-    fn step(&mut self) {
+    /// Apply the event at the cursor and move past it. Returns whether it
+    /// wrote a line to the event stream.
+    fn apply_next(&mut self, animate: bool) -> bool {
         let ev = self.history[self.cursor].clone();
+        let seq = self.world.log_seq;
+        self.world.apply(&ev, animate);
+        let shown = self.world.log_seq != seq;
+        match self.logged.get_mut(self.cursor) {
+            Some(l) => *l = shown,
+            None => self.logged.push(shown),
+        }
         self.cursor += 1;
-        self.world.apply(&ev, true);
-        self.act_acc += 1;
+        if animate {
+            self.act_acc += 1;
+        }
         if self.follow {
             let id = match &ev.kind {
                 Kind::Spawn { id, .. } => id,
                 Kind::Tool { agent, .. } | Kind::Text { agent, .. } => agent,
-                _ => return,
+                _ => return shown,
             };
             if id != ROOT {
                 if let Some(a) = self.world.agents.get(id) {
@@ -167,6 +188,162 @@ impl App {
                 }
             }
         }
+        shown
+    }
+
+    fn step(&mut self) {
+        self.apply_next(true);
+    }
+
+    /// Space: pause or resume. A pausable live view (the demo) pauses into
+    /// a replay at the current event; `l` goes live again.
+    pub fn toggle_pause(&mut self) {
+        if self.mode == Mode::Live && self.pausable {
+            self.freeze();
+        } else {
+            self.paused = !self.paused;
+        }
+    }
+
+    /// Stop a live view where it is and continue as a paused replay.
+    fn freeze(&mut self) {
+        self.mode = Mode::Replay;
+        self.paused = true;
+        if let Some(last) = self.cursor.checked_sub(1) {
+            self.vt = self.history[last].ts as f64;
+        }
+    }
+
+    /// Get ready to step: pause a replay, freeze a pausable live view.
+    /// False for a live session, which cannot be stepped.
+    fn enter_step(&mut self) -> bool {
+        match self.mode {
+            Mode::Live if self.pausable => self.freeze(),
+            Mode::Live => return false,
+            Mode::Replay => self.paused = true,
+        }
+        true
+    }
+
+    /// Step forward: apply every event of the next timestamp, and keep going
+    /// one timestamp at a time until something wrote a line to the event
+    /// stream. Events that write none (token usage, a subagent's prompt)
+    /// ride along with the next one that does. Returns whether it moved.
+    pub fn step_forward(&mut self) -> bool {
+        if !self.enter_step() {
+            return false;
+        }
+        let start = self.cursor;
+        while !self.at_end() {
+            let ts = self.history[self.cursor].ts;
+            let mut shown = false;
+            while !self.at_end() && self.history[self.cursor].ts == ts {
+                shown |= self.apply_next(true);
+            }
+            self.vt = ts as f64;
+            if shown {
+                break;
+            }
+        }
+        self.cursor > start
+    }
+
+    /// Cursor positions that stepping forward from the start stops at, up to
+    /// `upto`, with 0 first: the end of every timestamp group that wrote a
+    /// line to the event stream. Uses what was recorded when the events were
+    /// applied, so it applies nothing.
+    fn step_points(&self, upto: usize) -> Vec<usize> {
+        let mut points = vec![0];
+        let mut i = 0;
+        while i < upto {
+            let ts = self.history[i].ts;
+            let mut shown = false;
+            while i < upto && self.history[i].ts == ts {
+                shown |= self.logged.get(i).copied().unwrap_or(false);
+                i += 1;
+            }
+            if shown {
+                points.push(i);
+            }
+        }
+        points
+    }
+
+    /// Step back to where the previous forward step stopped: the state just
+    /// before the most recent event that wrote a stream line. The world is
+    /// rebuilt from the start of the session, without animation, so the cost
+    /// grows with the position in the session. Returns whether it moved.
+    pub fn step_back(&mut self) -> bool {
+        if !self.enter_step() || self.cursor == 0 {
+            return false;
+        }
+        let points = self.step_points(self.cursor);
+        let target = points[points.len().saturating_sub(2)];
+        self.rebuild(target);
+        true
+    }
+
+    /// Rebuild the world from the start up to (not including) event `target`.
+    fn rebuild(&mut self, target: usize) {
+        self.world = World::new(&self.root_label);
+        self.cursor = 0;
+        // Stalls are found by the clock, not by events: sweep where playback
+        // would have, at each stall limit passed before the next event, or
+        // where playback lands after skipping dead time.
+        let max_gap = (MAX_GAP_SECS * 1000.0 * self.speed()) as i64;
+        while self.cursor < target.min(self.history.len()) {
+            let ts = self.history[self.cursor].ts;
+            if self.cursor > 0 {
+                self.world.sweep_stalls_until(ts, ts - max_gap);
+            }
+            self.apply_next(false);
+        }
+        self.world.fx.clear();
+        self.packets.clear();
+        self.vt = match self.cursor.checked_sub(1) {
+            Some(last) => self.history[last].ts as f64,
+            None => self.history.first().map(|e| e.ts as f64).unwrap_or(0.0),
+        };
+        self.world.now_ts = self.vt as i64;
+        self.world.sweep_health();
+        self.selected = self.selected.min(self.world.order.len() - 1);
+        // Keep the stream scroll and the current match while their lines
+        // still exist; follow the tail when they are gone.
+        let seq = self.world.log_seq;
+        if self.panes.anchor.is_some_and(|a| a >= seq) {
+            self.panes.anchor = None;
+        }
+        self.panes.paused_at = self.panes.paused_at.min(seq);
+        if self.panes.current.is_some_and(|c| c >= seq) {
+            self.panes.current = None;
+        }
+    }
+
+    /// Whether `.` and `,` do anything: a replay, or a live view that can be
+    /// paused (the demo).
+    pub fn can_step(&self) -> bool {
+        self.mode == Mode::Replay || self.pausable
+    }
+
+    /// The most recent event that wrote a stream line, and how many other
+    /// such events share its timestamp: what a caption describes.
+    pub fn caption_event(&self) -> Option<(&Event, usize)> {
+        let last = (0..self.cursor)
+            .rev()
+            .find(|&i| self.logged.get(i) == Some(&true))?;
+        let ev = &self.history[last];
+        let others = (0..last)
+            .rev()
+            .take_while(|&i| self.history[i].ts == ev.ts)
+            .filter(|&i| self.logged.get(i) == Some(&true))
+            .count();
+        Some((ev, others))
+    }
+
+    /// Events before the one a caption describes, newest last; a caption
+    /// may look back for context (the call a tool error belongs to).
+    pub fn applied(&self) -> &[Event] {
+        &self.history[..self.cursor]
     }
 
     pub fn tick(&mut self, dt: f64) {
@@ -1383,6 +1560,282 @@ mod tests {
         assert_eq!(side_width(500, 140), 140 - GRAPH_MIN_W);
         assert_eq!(side_width(0, 140), SIDE_MIN_W);
         assert_eq!(side_width(SIDE_W, SIDE_MIN_TERM_W), SIDE_W);
+    }
+
+    /// What stepping and playing must agree on: position, agents, stream
+    /// lines, tokens and tool calls.
+    fn state(app: &App) -> (usize, usize, u64, u64, u64) {
+        let w = &app.world;
+        (
+            app.cursor,
+            w.order.len(),
+            w.log_seq,
+            w.total_tokens(),
+            w.total_tools,
+        )
+    }
+
+    /// A paused demo replay with `secs` seconds of script loaded and nothing
+    /// applied yet.
+    fn loaded(seed: u32, secs: usize) -> App {
+        let mut app = App::new(
+            Box::new(DemoSource::new(seed)),
+            Mode::Replay,
+            "demo",
+            "demo",
+        );
+        app.paused = true;
+        for _ in 0..secs * 30 {
+            app.tick(1.0 / 30.0);
+        }
+        assert_eq!(app.cursor, 0);
+        assert!(app.history.len() > 30);
+        app
+    }
+
+    #[test]
+    fn stepping_forward_lands_where_playing_does() {
+        let mut stepped = loaded(5, 20);
+        let mut at = HashMap::new();
+        while stepped.step_forward() {
+            stepped.tick(0.0);
+            assert!(stepped.paused);
+            at.insert(stepped.cursor, state(&stepped));
+        }
+        assert!(stepped.at_end());
+        assert!(at.len() > 50, "{} steps", at.len());
+        // The same script, played at the default speed.
+        let mut played = App::new(Box::new(DemoSource::new(5)), Mode::Replay, "demo", "demo");
+        let mut seen = 0;
+        for _ in 0..20 * 30 {
+            played.tick(1.0 / 30.0);
+            if let Some(s) = at.get(&played.cursor) {
+                assert_eq!(state(&played), *s, "at event {}", played.cursor);
+                seen += 1;
+            }
+        }
+        assert!(seen > 20, "compared {seen} times");
+    }
+
+    #[test]
+    fn stepping_back_then_forward_returns_to_the_same_state() {
+        let mut app = loaded(6, 20);
+        for _ in 0..40 {
+            assert!(app.step_forward());
+        }
+        app.tick(0.0);
+        let mut trail = vec![state(&app)];
+        for _ in 0..15 {
+            assert!(app.step_back());
+            app.tick(0.0);
+            let s = state(&app);
+            assert!(s.0 < trail.last().unwrap().0, "moved back");
+            trail.push(s);
+            // The same as a world built straight from the events.
+            let mut w = World::new("demo");
+            for ev in &app.history[..app.cursor] {
+                w.apply(ev, false);
+            }
+            let fresh = (w.order.len(), w.log_seq, w.total_tokens(), w.total_tools);
+            assert_eq!((s.1, s.2, s.3, s.4), fresh);
+        }
+        trail.pop();
+        while let Some(want) = trail.pop() {
+            assert!(app.step_forward());
+            app.tick(0.0);
+            assert_eq!(state(&app), want);
+        }
+        // Back to the start, and no further.
+        while app.step_back() {}
+        assert_eq!(state(&app), (0, 1, 0, 0, 0));
+        assert!(app.paused);
+    }
+
+    #[test]
+    fn steps_pause_a_replay_and_live_sessions_do_not_step() {
+        let mut replay = App::new(Box::new(DemoSource::new(2)), Mode::Replay, "d", "d");
+        for _ in 0..300 {
+            replay.tick(1.0 / 30.0);
+        }
+        assert!(!replay.paused);
+        let at = replay.cursor;
+        assert!(replay.step_back());
+        assert!(replay.paused && replay.cursor < at);
+
+        let mut live = App::new(Box::new(DemoSource::new(2)), Mode::Live, "d", "d");
+        for _ in 0..300 {
+            live.tick(1.0 / 30.0);
+        }
+        let before = state(&live);
+        assert!(!live.step_forward());
+        assert!(!live.step_back());
+        assert!(live.mode == Mode::Live);
+        assert_eq!(state(&live), before);
+        // A scripted live view (the demo) pauses into a replay instead.
+        live.pausable = true;
+        live.toggle_pause();
+        assert!(live.mode == Mode::Replay && live.paused);
+        assert_eq!(state(&live), before);
+        assert!(live.step_back());
+        assert!(live.cursor < before.0);
+        live.jump_to_end();
+        assert!(live.mode == Mode::Live);
+    }
+
+    /// A source that hands over a fixed list of events on the first poll.
+    struct Fixed(Vec<Event>);
+
+    impl Source for Fixed {
+        fn poll(&mut self) -> Vec<Event> {
+            std::mem::take(&mut self.0)
+        }
+    }
+
+    /// A session with two stalls: `quiet` goes silent after text while
+    /// `busy` keeps calling tools every 5 s (the stall limit passes between
+    /// two events), then `busy` waits on a call through a 40 minute gap
+    /// that playback skips.
+    fn stalling() -> Vec<Event> {
+        let t0 = 1_700_000_000_000;
+        let spawn = |id: &str| Kind::Spawn {
+            id: id.into(),
+            parent: ROOT.into(),
+            agent_type: id.into(),
+            label: "work".into(),
+        };
+        let call = |n: i64| Kind::Tool {
+            agent: "busy".into(),
+            tool: "Read".into(),
+            detail: format!("f{n}"),
+            key: n as u64,
+        };
+        let mut evs = vec![
+            Event {
+                ts: t0,
+                kind: spawn("quiet"),
+            },
+            Event {
+                ts: t0,
+                kind: spawn("busy"),
+            },
+            Event {
+                ts: t0 + 1_000,
+                kind: Kind::Text {
+                    agent: "quiet".into(),
+                    text: "thinking".into(),
+                },
+            },
+        ];
+        for n in 1..=150 {
+            evs.push(Event {
+                ts: t0 + n * 5_000,
+                kind: call(n),
+            });
+        }
+        let late = t0 + 150 * 5_000 + 40 * 60_000;
+        evs.push(Event {
+            ts: late,
+            kind: call(1_000),
+        });
+        evs.push(Event {
+            ts: late + 1_000,
+            kind: Kind::Text {
+                agent: ROOT.into(),
+                text: "done".into(),
+            },
+        });
+        evs
+    }
+
+    fn lines(app: &App) -> Vec<(i64, String, String)> {
+        app.world
+            .log
+            .iter()
+            .map(|l| (l.ts, l.agent.clone(), l.text.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn rebuilt_log_keeps_the_stall_lines_playback_wrote() {
+        let mut played = App::new(Box::new(Fixed(stalling())), Mode::Replay, "s", "s");
+        // Played logs at every step stop, captured as playback reaches it.
+        let mut at: HashMap<usize, Vec<(i64, String, String)>> = HashMap::new();
+        while !played.at_end() {
+            played.tick(1.0 / 30.0);
+            at.entry(played.cursor).or_insert_with(|| lines(&played));
+        }
+        for _ in 0..30 {
+            played.tick(1.0 / 30.0);
+        }
+        let stalls = played
+            .world
+            .log
+            .iter()
+            .filter(|l| l.kind == crate::state::LogKind::Health)
+            .count();
+        assert_eq!(stalls, 2, "both agents stalled while playing");
+
+        let mut rebuilt = App::new(Box::new(Fixed(stalling())), Mode::Replay, "s", "s");
+        rebuilt.paused = true;
+        rebuilt.tick(0.0);
+        rebuilt.jump_to_end();
+        rebuilt.mode = Mode::Replay;
+        let points = rebuilt.step_points(rebuilt.history.len());
+        let mut compared = 0;
+        for &p in &points {
+            let Some(want) = at.get(&p) else { continue };
+            rebuilt.rebuild(p);
+            rebuilt.tick(0.0);
+            let got = lines(&rebuilt);
+            assert_eq!(got.len(), want.len(), "lines at event {p}");
+            for (g, w) in got.iter().zip(want) {
+                assert_eq!((&g.1, &g.2), (&w.1, &w.2), "at event {p}");
+                // Playback notices a stall within one frame (8x: 267 ms).
+                assert!((g.0 - w.0).abs() <= 300, "at event {p}: {g:?} {w:?}");
+            }
+            compared += 1;
+        }
+        assert!(compared > 20, "compared {compared} stops");
+        // Stepping back from the end keeps both stall lines too.
+        rebuilt.rebuild(rebuilt.history.len());
+        assert!(rebuilt.step_back());
+        let stalls = rebuilt
+            .world
+            .log
+            .iter()
+            .filter(|l| l.kind == crate::state::LogKind::Health)
+            .count();
+        assert_eq!(stalls, 2);
+    }
+
+    #[test]
+    fn step_back_keeps_the_stream_scroll_and_match() {
+        let mut app = loaded(9, 30);
+        for _ in 0..60 {
+            app.step_forward();
+        }
+        app.scroll_stream(-5);
+        let anchor = app.panes.anchor.expect("scrolled back");
+        app.panes.current = Some(anchor);
+        app.step_back();
+        assert_eq!(app.panes.anchor, Some(anchor), "line still there");
+        assert_eq!(app.panes.current, Some(anchor));
+        // Back past the anchored line: follow the tail again.
+        while app.world.log_seq > anchor {
+            app.step_back();
+        }
+        assert_eq!(app.panes.anchor, None);
+        assert_eq!(app.panes.current, None);
+    }
+
+    #[test]
+    fn caption_event_is_the_latest_one_the_stream_shows() {
+        let mut app = loaded(8, 10);
+        assert!(app.caption_event().is_none());
+        app.step_forward();
+        let (ev, _) = app.caption_event().expect("one event shown");
+        assert!(!matches!(ev.kind, Kind::Usage { .. }));
+        assert_eq!(ev.ts, app.history[app.cursor - 1].ts);
     }
 
     #[test]

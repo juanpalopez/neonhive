@@ -1,9 +1,10 @@
 //! Rendering. Everything draws straight into the ratatui buffer.
 
 use crate::app::{
-    log_who, side_width, stream_height, App, Mode, Panel, Space, BORN_SECS, DYING_SECS,
-    SIDE_MIN_TERM_W,
+    log_who, side_width, stream_height, App, Mode, Panel, Space, BODY_MIN_H, BORN_SECS, DYING_SECS,
+    SIDE_MIN_TERM_W, STREAM_MIN_H,
 };
+use crate::caption::{self, Tone};
 use crate::event::ROOT;
 use crate::fx::{self, Rgb};
 use crate::state::{Agent, LogKind, PacketKind, Status, World};
@@ -132,11 +133,23 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     app.panes.term = (area.width, area.height);
     app.panes.side_shown = area.width >= SIDE_MIN_TERM_W;
-    let log_h = stream_height(app.panes.stream_h, area.height);
-    let [header, body, log, footer] = Layout::vertical([
+    let mut log_h = stream_height(app.panes.stream_h, area.height);
+    // Captions sit between the stream and the footer. Their two rows come
+    // from the graph while it keeps BODY_MIN_H rows, then from the stream
+    // while it keeps STREAM_MIN_H.
+    let cap_h = if app.captions {
+        let spare = area.height.saturating_sub(2 + log_h + BODY_MIN_H);
+        let take = 2.min(spare + log_h.saturating_sub(STREAM_MIN_H));
+        log_h -= take.saturating_sub(spare);
+        take
+    } else {
+        0
+    };
+    let [header, body, log, cap, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
         Constraint::Length(log_h),
+        Constraint::Length(cap_h),
         Constraint::Length(1),
     ])
     .areas(area);
@@ -166,9 +179,65 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         }
         draw_log(buf, log, app);
     }
+    draw_caption(buf, cap, app);
     draw_footer(buf, footer, app);
     if app.help {
         draw_help(buf, area);
+    }
+}
+
+/// The caption for the most recent event: what happened, then what it means.
+fn draw_caption(buf: &mut Buffer, area: Rect, app: &App) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let found = app
+        .caption_event()
+        .and_then(|(ev, others)| Some((caption::describe(&app.world, app.applied(), ev)?, others)));
+    let Some((c, others)) = found else {
+        let hint =
+            " ◆ captions on: play, or pause and step with . and , to see each event explained";
+        buf.set_stringn(area.x, area.y, hint, area.width as usize, fg(fx::DIM));
+        return;
+    };
+    let color = match c.tone {
+        Tone::Spawn => fx::MAGENTA,
+        Tone::Result => fx::GREEN,
+        Tone::Fail => fx::RED,
+        Tone::Message => fx::YELLOW,
+        Tone::Tool => fx::CYAN,
+        Tone::Text => fx::TEXT,
+    };
+    let mut spans = vec![Span::styled(" ◆ ", bold(color))];
+    for p in &c.what {
+        let style = if p.name {
+            bold(fx::CYAN)
+        } else {
+            fg(fx::WHITE)
+        };
+        spans.push(Span::styled(p.text.clone(), style));
+    }
+    let width = area.width as usize;
+    let line = Line::from(spans);
+    let first = wrap_line(&line, width)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    first.render(Rect::new(area.x, area.y, area.width, 1), buf);
+    if area.height > 1 {
+        let more = match others {
+            0 => String::new(),
+            1 => "+1 more event at this moment · ".to_string(),
+            n => format!("+{n} more events at this moment · "),
+        };
+        let text = format!("   {more}{}", c.hint);
+        buf.set_stringn(
+            area.x,
+            area.y + 1,
+            head_fit(&text, width),
+            width,
+            fg(fx::DIM),
+        );
     }
 }
 
@@ -190,7 +259,9 @@ fn draw_footer(buf: &mut Buffer, area: Rect, app: &App) {
         line.render(area, buf);
         return;
     }
-    let keys = " tab focus  z full  ↑↓ select/scroll  / search  [ ] < > resize  f follow  c cost  space pause  +/- speed  r replay  l live  ? help  esc back  q quit";
+    // The step keys do nothing in a live session, so they are not offered.
+    let step = if app.can_step() { ". , step  " } else { "" };
+    let keys = format!(" ? help  tab focus  z full  ↑↓ select/scroll  / search  [ ] < > resize  f follow  c cost  space pause  {step}e captions  +/- speed  r replay  l live  esc back  q quit");
     let mut spans = Vec::new();
     if !p.query.is_empty() {
         let grep = if p.filter { "& all lines" } else { "& grep" };
@@ -1143,7 +1214,7 @@ fn split_chars(s: &str, n: usize) -> (&str, &str) {
     s.split_at(cut)
 }
 
-const HELP: [&str; 31] = [
+const HELP: [&str; 34] = [
     "tab / S-tab  focus next / previous panel",
     "z            full size focused panel, again",
     "             or esc to restore",
@@ -1163,7 +1234,10 @@ const HELP: [&str; 31] = [
     "",
     "f            follow most recent activity",
     "c            roster: cost by agent type",
-    "space        pause or resume replay",
+    "space        pause or resume replay or demo",
+    ". ,          paused: step to next / previous",
+    "             event (pauses a playing replay)",
+    "e            captions: explain each event",
     "+ / -        replay speed",
     "r            replay session from start",
     "l            jump to end, follow live",
@@ -1260,6 +1334,7 @@ mod tests {
     fn never_panics_at_any_terminal_size() {
         let mut app = busy_app();
         app.help = true;
+        app.captions = true;
         for w in (1..220).step_by(7) {
             for h in (1..70).step_by(3) {
                 frame(&mut app, w, h);
@@ -1469,6 +1544,7 @@ mod tests {
                 for _ in 0..2 {
                     pane_state(&mut app, k);
                     app.help = k.is_multiple_of(5);
+                    app.captions = k.is_multiple_of(3);
                     frame(&mut app, w, h);
                     k += 1;
                 }
@@ -1645,6 +1721,34 @@ mod tests {
                 assert!(word.is_empty() || short.split(' ').any(|w| word.ends_with(w)));
             }
         }
+    }
+
+    #[test]
+    fn captions_sit_above_the_footer_and_keep_the_graph() {
+        for (w, h) in [(140, 40), (80, 24), (60, 16)] {
+            let mut app = busy_app();
+            frame(&mut app, w, h);
+            let off = frame(&mut app, w, h);
+            app.captions = true;
+            let on = frame(&mut app, w, h);
+            let rows: Vec<&str> = on.lines().collect();
+            assert!(rows[h as usize - 3].starts_with(" ◆ "), "{w}x{h}:\n{on}");
+            assert!(on.contains("NEURAL TOPOLOGY") && on.contains("EVENT STREAM"));
+            let off_rows: Vec<&str> = off.lines().collect();
+            assert!(!off_rows[h as usize - 3].starts_with(" ◆ "), "{off}");
+        }
+    }
+
+    #[test]
+    fn footer_offers_step_keys_only_where_they_work() {
+        let mut app = busy_app();
+        assert!(app.mode == Mode::Live && !app.pausable);
+        assert!(!frame(&mut app, 220, 40).contains(". , step"));
+        app.pausable = true;
+        assert!(frame(&mut app, 220, 40).contains(". , step"));
+        app.pausable = false;
+        app.restart();
+        assert!(frame(&mut app, 220, 40).contains(". , step"), "replay");
     }
 
     #[test]
