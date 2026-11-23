@@ -583,18 +583,39 @@ fn draw_graph(buf: &mut Buffer, area: Rect, app: &mut App) {
             fg(fx::DIM),
         );
     }
-    let off_screen = (app.world.order.len()).saturating_sub(app.nodes.len());
-    if off_screen > 0 {
-        let msg = format!(" +{off_screen} archived ");
-        let x = inner.right().saturating_sub(msg.chars().count() as u16);
-        buf.set_stringn(
-            x,
-            inner.bottom() - 1,
-            &msg,
-            inner.width as usize,
-            fg(fx::DIM),
-        );
+    // Agents outside the visible set (`nodes` also holds the ones fading
+    // out), and how many of them are flagged.
+    let (count, flags) = archived_label(app.hidden, app.hidden_flagged, inner.width as usize);
+    let width = (count.chars().count() + flags.chars().count()) as u16;
+    let x = inner.right().saturating_sub(width);
+    let y = inner.bottom() - 1;
+    let (x, _) = buf.set_stringn(x, y, &count, inner.width as usize, fg(fx::DIM));
+    buf.set_stringn(x, y, &flags, inner.width as usize, bold(fx::ORANGE));
+}
+
+/// The "+N archived" label in two parts, count and flags, shortened to fit
+/// `width` cells: " +54 archived · 3 ▲ ", then " +54 · 3 ▲ ", then " 3 ▲ ".
+/// Flags outlast the count, since nothing else may show them on a small
+/// screen. Both parts are empty when there is nothing to say or no room.
+fn archived_label(hidden: usize, flagged: usize, width: usize) -> (String, String) {
+    let flags = |sep: &str| match flagged {
+        0 => String::new(),
+        n => format!("{sep}{n} {HEALTH_GLYPH} "),
+    };
+    if hidden == 0 {
+        return (String::new(), String::new());
     }
+    let mut tries = vec![
+        (format!(" +{hidden} archived "), flags("· ")),
+        (format!(" +{hidden} "), flags("· ")),
+    ];
+    if flagged > 0 {
+        tries.push((" ".to_string(), flags("")));
+    }
+    tries
+        .into_iter()
+        .find(|(c, f)| c.chars().count() + f.chars().count() <= width)
+        .unwrap_or_default()
 }
 
 /// The flag part of a node's bottom row, at most `budget` cells: "loop x12"
@@ -1353,6 +1374,145 @@ mod tests {
         }
         app.panes.stream_h = [None, Some(9), Some(1), Some(200)][k % 4];
         app.panes.side_w = [40, 0, 500][(k / 3) % 3];
+    }
+
+    struct NoEvents;
+
+    impl crate::event::Source for NoEvents {
+        fn poll(&mut self) -> Vec<Event> {
+            Vec::new()
+        }
+    }
+
+    fn apply(app: &mut App, ts: i64, kind: Kind) {
+        app.world.apply(&Event { ts, kind }, true);
+    }
+
+    /// A crowded synthetic session: `n` agents three levels deep (every
+    /// third under the previous agent), all running but every fourth
+    /// finished, and every tenth looping.
+    fn crowded_app(n: usize) -> App {
+        let mut app = App::new(Box::new(NoEvents), Mode::Replay, "crowd", "crowd");
+        for i in 0..n {
+            let parent = match i % 3 {
+                0 => ROOT.to_string(),
+                _ => format!("a{}", i - 1),
+            };
+            let kind = Kind::Spawn {
+                id: format!("a{i}"),
+                parent,
+                agent_type: format!("type-{}", i % 7),
+                label: format!("task {i}"),
+            };
+            apply(&mut app, i as i64, kind);
+        }
+        for i in 0..n {
+            let id = format!("a{i}");
+            let calls = if i % 10 == 5 { 4 } else { 1 };
+            for c in 0..calls {
+                let kind = Kind::Tool {
+                    agent: id.clone(),
+                    tool: "Read".into(),
+                    detail: "src/main.rs".into(),
+                    key: if calls > 1 { 7 } else { i as u64 + c },
+                };
+                apply(&mut app, 1000 + i as i64, kind);
+            }
+            if i % 4 == 3 {
+                let kind = Kind::Finish {
+                    id,
+                    ok: true,
+                    tokens: None,
+                };
+                apply(&mut app, 1000 + i as i64, kind);
+            }
+        }
+        app
+    }
+
+    #[test]
+    fn archived_count_ignores_fading_nodes() {
+        let mut app = crowded_app(30);
+        frame(&mut app, 140, 40); // sizes the graph
+        app.tick(1.0 / 30.0);
+        let shown = |app: &App| app.nodes.values().filter(|n| n.dying.is_none()).count();
+        assert_eq!(app.hidden, app.world.order.len() - shown(&app));
+        // Finish every running agent on the graph: others take their place
+        // and the finished ones fade out.
+        let on_graph: Vec<String> = app.nodes.keys().filter(|id| *id != ROOT).cloned().collect();
+        for id in on_graph {
+            let kind = Kind::Finish {
+                id,
+                ok: true,
+                tokens: None,
+            };
+            apply(&mut app, 2000, kind);
+        }
+        app.tick(1.0 / 30.0);
+        assert!(
+            app.nodes.values().any(|n| n.dying.is_some()),
+            "nothing fades"
+        );
+        let hidden = app.world.order.len() - shown(&app);
+        assert_eq!(app.hidden, hidden);
+        assert!(app.nodes.len() > shown(&app));
+        let text = frame(&mut app, 140, 40);
+        assert!(
+            text.contains(&format!("+{hidden} archived")),
+            "want +{hidden} archived:\n{text}"
+        );
+    }
+
+    #[test]
+    fn archived_label_shortens_and_keeps_flags() {
+        let join = |(c, f): (String, String)| c + &f;
+        assert_eq!(join(archived_label(54, 3, 80)), " +54 archived · 3 ▲ ");
+        assert_eq!(join(archived_label(54, 0, 80)), " +54 archived ");
+        assert_eq!(join(archived_label(54, 3, 12)), " +54 · 3 ▲ ");
+        assert_eq!(join(archived_label(54, 3, 5)), " 3 ▲ ");
+        assert_eq!(join(archived_label(54, 0, 5)), " +54 ");
+        assert_eq!(join(archived_label(54, 3, 2)), "");
+        assert_eq!(join(archived_label(0, 0, 80)), "");
+        for w in 0..30 {
+            let s = join(archived_label(1234, 56, w));
+            assert!(s.chars().count() <= w, "{w}: {s:?}");
+        }
+    }
+
+    #[test]
+    fn small_graph_counts_hidden_flags() {
+        // 150 agents with every tenth looping; at 80x24 most flags are off
+        // the graph and the header has no room for its flag count.
+        let mut app = crowded_app(150);
+        frame(&mut app, 80, 24);
+        app.tick(1.0 / 30.0);
+        let text = frame(&mut app, 80, 24);
+        assert!(app.hidden_flagged > 0);
+        assert!(!text.contains("FLAGGED"), "{text}");
+        let want = format!("+{} archived · {} ▲", app.hidden, app.hidden_flagged);
+        assert!(text.contains(&want), "want {want}:\n{text}");
+        // Healthy running agents still get a node.
+        let healthy = app.nodes.keys().filter(|id| {
+            let a = &app.world.agents[*id];
+            *id != ROOT && a.status == Status::Running && !a.health.flag().is_flagged()
+        });
+        assert!(healthy.count() >= 1, "{text}");
+    }
+
+    #[test]
+    fn never_panics_with_a_crowded_graph() {
+        let mut app = crowded_app(150);
+        assert!(app.world.flagged() >= 5);
+        assert!(app.world.running() >= 40);
+        app.follow = false;
+        app.selected = app.world.order.len() - 1;
+        for w in (1..220).step_by(7) {
+            for h in (1..70).step_by(3) {
+                frame(&mut app, w, h);
+                app.tick(1.0 / 30.0);
+                app.selected = (app.selected + 37) % app.world.order.len();
+            }
+        }
     }
 
     #[test]
