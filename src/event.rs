@@ -1,5 +1,5 @@
-//! Normalized event stream. Every source adapter (Claude Code today, Codex and
-//! others later) emits these; the rest of the app never sees a source format.
+//! Normalized event stream. Every source adapter (Claude Code, Codex CLI and
+//! the demo today) emits these; the rest of the app never sees a source format.
 
 /// Id of the top-level agent of a session.
 pub const ROOT: &str = "main";
