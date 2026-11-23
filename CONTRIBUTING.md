@@ -160,7 +160,7 @@ and after your change. For visual changes, please include a before and after.
 
 ## Guidelines
 
-- **Keep the core tool-agnostic.** Nothing outside a source adapter should know what Claude Code is.
+- **Keep the core tool-agnostic.** Nothing outside a source adapter should know about a specific agent tool such as Claude Code or Codex.
 - **Parse defensively.** Transcript formats are not stable contracts. Skip what you do not recognise; never panic on input.
 - **Test what you add.** Parser tests build small transcript files in a temp directory; see the tests at the bottom of `src/claude.rs`. Never commit real transcripts: they contain private prompts and code.
 - **No panics at any terminal size.** `ui::tests::never_panics_at_any_terminal_size` sweeps sizes; keep it passing.
@@ -170,8 +170,8 @@ and after your change. For visual changes, please include a before and after.
 ## Reporting bugs
 
 Open an issue with your OS, terminal, neonhive version (`neonhive --version`), the
-Claude Code version if the bug is about a session, and a `--snapshot` frame if it is
-visual. Remove anything private from snapshots before posting.
+agent tool and its version if the bug is about a session (for example Claude Code
+2.1.x or Codex CLI 0.x), and a `--snapshot` frame if it is visual. Remove anything private from snapshots before posting.
 
 AI coding agents: [AGENTS.md](AGENTS.md) holds the rules for them (Claude Code reads it through `CLAUDE.md`).
 

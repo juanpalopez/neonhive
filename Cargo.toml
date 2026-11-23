@@ -3,12 +3,12 @@ name = "neonhive"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.87"
-description = "Cyberpunk terminal UI that visualizes Claude Code agents and subagents, live or as a replay"
+description = "Terminal UI that visualizes AI agents and subagents, live or as a replay (Claude Code, Codex CLI)"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/juanpalopez/neonhive"
 homepage = "https://github.com/juanpalopez/neonhive"
-keywords = ["tui", "agents", "claude", "visualization", "ratatui"]
+keywords = ["ai-agents", "subagents", "tui", "claude-code", "codex"]
 categories = ["command-line-utilities", "visualization", "development-tools"]
 exclude = ["docs/demo.svg", "docs/RELEASING.md", ".github", "scripts", "AGENTS.md", "CLAUDE.md"]
 

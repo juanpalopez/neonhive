@@ -1,6 +1,8 @@
 # Architecture
 
-neonhive is a pipeline. Each stage knows only about the stage before it.
+neonhive is a pipeline. Each stage knows only about the stage before it. Only the
+source adapters know which agent tool wrote a session (Claude Code and Codex CLI
+today, plus the synthetic demo), so the rest is the same for every tool.
 
 ```
 transcript files ──▶ Source ──▶ Event ──▶ World ──▶ App ──▶ ui
